@@ -1,0 +1,21 @@
+[project]
+name = "mpi-sinkhorn-step"
+version = "0.1.0"
+description = "MPI row-partitioned Sinkhorn-Knopp solver MVP"
+requires-python = ">=3.10"
+dependencies = [
+    "mpi4py>=3.1",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
