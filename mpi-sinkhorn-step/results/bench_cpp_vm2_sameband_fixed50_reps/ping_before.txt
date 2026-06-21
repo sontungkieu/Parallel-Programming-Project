@@ -1,0 +1,10 @@
+PING 192.168.1.227 (192.168.1.227) 56(84) bytes of data.
+64 bytes from 192.168.1.227: icmp_seq=1 ttl=64 time=5.06 ms
+64 bytes from 192.168.1.227: icmp_seq=2 ttl=64 time=3.53 ms
+64 bytes from 192.168.1.227: icmp_seq=3 ttl=64 time=5.12 ms
+64 bytes from 192.168.1.227: icmp_seq=4 ttl=64 time=4.66 ms
+64 bytes from 192.168.1.227: icmp_seq=5 ttl=64 time=5.02 ms
+
+--- 192.168.1.227 ping statistics ---
+5 packets transmitted, 5 received, 0% packet loss, time 4044ms
+rtt min/avg/max/mdev = 3.526/4.675/5.115/0.596 ms
