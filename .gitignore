@@ -118,6 +118,9 @@ ipython_config.py
 .pdm-build/
 
 # pixi
+
+# Local benchmark raw outputs; keep summarized CSV/Markdown results instead.
+mpi-sinkhorn-step/results/**/*.json
 #   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
 # pixi.lock
 #   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
