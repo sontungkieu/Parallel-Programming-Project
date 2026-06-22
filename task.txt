@@ -1,0 +1,27 @@
+For final grade
+Form a group of four people, then set up an MPI cluster system consisting of at least three physical machines, similar to the one in the video(https://m.youtube.com/watch?v=-t4k6IwmtFI&list=PLOB8_oGJl40Sxjn9rtgSVgg9tfC4Z4MWe&index=1&pp=iAQB). After successfully setting it up, think about implementing a parallel algorithm on it. Your final grade will depend on the difficulty of the problem (as well as the algorithm) you implement.  
+"""
+Chung please read the info above
+ 
+Chung You can install a Linux virtual machine on a Windows/MacOS computer (using a Bridge Adapter network connection when setting up the virtual machine's networking). For example, consider this architecture: using a mobile phone to broadcast a wireless local network connecting three physical Windows machines: each Windows machine has an Ubuntu virtual machine installed => we have a wireless LAN with three Ubuntu machines connected to each other. Note: Do not install more than one virtual machine on one physical machine.
+ 
+Dear professor, should we precompute the results of our algorithms and just present them during our presentations, or must it be a live demo? And also, do we need to write a report? Thank you
+ 
+demo offine, and yes, you must submit a report, the content of report will be discussed later
+ 
+Dear professor, when will we be expected to present our capstone project? And for progress grade, are we going to do an exam? If so, in which week will we do it? Thank you.
+ 
+Relax, we have at least two months left; I'll announce the deadline later.
+ 
+General 
+ 
+Fill in your group information in this file: increment group-id by 1 and add a new color to your group.
+ 
+https://docs.google.com/spreadsheets/d/1YtfdRpfKyp65t8UtthezkjM0ZE9uCJK_iOATsiMQHrM/edit?usp=sharing
+List_Parallel_Programming_Course - Google Sheets
+ 
+Chung The proposed topic is self-suggested and can be modified later if desired.
+ 
+General the program of your project must have a minimum of 250 lines of code per person (e.g. 1000 lines of code for a group of 4 members). Scoring will be based on: the interest of the topic, how the problem is parallelized, whether the demo runs, how well the report is and whether any member understands their group's code.
+ """
+Tôi muốn duyệt qua tất cả repo trong https://github.com/anindex xem cái nào phù hợp trong việc triển khai 
