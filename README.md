@@ -4,6 +4,7 @@
 ## Implementation
 
 - [MPI Sinkhorn Step MVP](mpi-sinkhorn-step/README.md)
+- [C++ MPI cluster runbook](mpi-sinkhorn-step/CPP_CLUSTER_RUNBOOK.md)
 - [Implementation summary](mpi_sinkhorn_mvp_implementation_report.md)
 
 ## Reports
