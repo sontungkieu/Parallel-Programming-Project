@@ -13,6 +13,10 @@ P = diag(u) K diag(v)
 
 The MPI version partitions the cost matrix by rows. Each rank computes local matrix-vector work, then uses `MPI.Allreduce` for the global `K.T @ u` update and convergence metrics.
 
+For detailed VM setup, SSH connection, hostfile, and cluster run commands, read:
+
+- [Python MPI cluster runbook](PYTHON_CLUSTER_RUNBOOK.md)
+
 ## Install
 
 On every machine:
