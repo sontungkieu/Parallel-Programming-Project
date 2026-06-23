@@ -21,6 +21,8 @@
 namespace {
 
 constexpr double kTiny = 1e-12;
+constexpr int kQueueRequestTag = 4101;
+constexpr int kQueueReplyTag = 4102;
 
 struct Args {
     std::string mode = "sequential";
@@ -935,102 +937,6 @@ void accumulate_chunk_final(
     }
 }
 
-void reset_queue_counter(int& counter, MPI_Win window, int rank, MPI_Comm comm, double& scheduler_sec) {
-    const double started = now_seconds();
-    (void)counter;
-    MPI_Barrier(comm);
-    if (rank == 0) {
-        int zero = 0;
-        MPI_Win_lock(MPI_LOCK_EXCLUSIVE, 0, 0, window);
-        MPI_Put(&zero, 1, MPI_INT, 0, 0, 1, MPI_INT, window);
-        MPI_Win_flush(0, window);
-        MPI_Win_unlock(0, window);
-    }
-    MPI_Barrier(comm);
-    scheduler_sec += now_seconds() - started;
-}
-
-int fetch_queue_chunk(MPI_Win window, double& scheduler_sec) {
-    int one = 1;
-    int previous = 0;
-    const double started = now_seconds();
-    MPI_Win_lock(MPI_LOCK_EXCLUSIVE, 0, 0, window);
-    MPI_Fetch_and_op(&one, &previous, MPI_INT, 0, 0, MPI_SUM, window);
-    MPI_Win_flush(0, window);
-    MPI_Win_unlock(0, window);
-    scheduler_sec += now_seconds() - started;
-    return previous;
-}
-
-QueuePhaseStats run_queue_column_phase(
-    const Args& args,
-    const std::vector<RowBlock>& chunks,
-    const std::vector<double>& v,
-    double global_min,
-    std::vector<double>& local_col,
-    int& counter,
-    MPI_Win window,
-    int rank,
-    MPI_Comm comm
-) {
-    QueuePhaseStats stats;
-    reset_queue_counter(counter, window, rank, comm, stats.scheduler_sec);
-
-    std::vector<double> row_kernel(args.cols, 0.0);
-    while (true) {
-        const int chunk_id = fetch_queue_chunk(window, stats.scheduler_sec);
-        if (chunk_id >= static_cast<int>(chunks.size())) {
-            break;
-        }
-        const RowBlock& chunk = chunks[chunk_id];
-        const double compute_started = now_seconds();
-        accumulate_chunk_columns(args, chunk, v, global_min, local_col, row_kernel);
-        stats.compute_sec += now_seconds() - compute_started;
-        stats.rows += block_rows(chunk);
-        stats.chunks += 1;
-    }
-    return stats;
-}
-
-QueuePhaseStats run_queue_final_phase(
-    const Args& args,
-    const std::vector<RowBlock>& chunks,
-    const std::vector<double>& v,
-    double global_min,
-    std::vector<double>& local_col,
-    int& counter,
-    MPI_Win window,
-    int rank,
-    MPI_Comm comm
-) {
-    QueuePhaseStats stats;
-    reset_queue_counter(counter, window, rank, comm, stats.scheduler_sec);
-
-    std::vector<double> row_kernel(args.cols, 0.0);
-    while (true) {
-        const int chunk_id = fetch_queue_chunk(window, stats.scheduler_sec);
-        if (chunk_id >= static_cast<int>(chunks.size())) {
-            break;
-        }
-        const RowBlock& chunk = chunks[chunk_id];
-        const double compute_started = now_seconds();
-        accumulate_chunk_final(
-            args,
-            chunk,
-            v,
-            global_min,
-            local_col,
-            row_kernel,
-            stats.row_error,
-            stats.objective
-        );
-        stats.compute_sec += now_seconds() - compute_started;
-        stats.rows += block_rows(chunk);
-        stats.chunks += 1;
-    }
-    return stats;
-}
-
 QueuePhaseStats run_local_column_phase(
     const Args& args,
     const std::vector<RowBlock>& chunks,
@@ -1078,6 +984,108 @@ QueuePhaseStats run_local_final_phase(
     return stats;
 }
 
+void serve_chunk_queue(const std::vector<RowBlock>& chunks, int size, MPI_Comm comm, QueuePhaseStats& stats) {
+    const double started = now_seconds();
+    int next_chunk = 0;
+    int stopped_workers = 0;
+    const int worker_count = size - 1;
+    while (stopped_workers < worker_count) {
+        int request = 0;
+        MPI_Status status;
+        MPI_Recv(&request, 1, MPI_INT, MPI_ANY_SOURCE, kQueueRequestTag, comm, &status);
+
+        const int chunk_id = next_chunk < static_cast<int>(chunks.size()) ? next_chunk++ : -1;
+        MPI_Send(&chunk_id, 1, MPI_INT, status.MPI_SOURCE, kQueueReplyTag, comm);
+        if (chunk_id < 0) {
+            stopped_workers += 1;
+        }
+    }
+    stats.scheduler_sec += now_seconds() - started;
+}
+
+int request_chunk(MPI_Comm comm, QueuePhaseStats& stats) {
+    int request = 1;
+    int chunk_id = -1;
+    const double started = now_seconds();
+    MPI_Send(&request, 1, MPI_INT, 0, kQueueRequestTag, comm);
+    MPI_Recv(&chunk_id, 1, MPI_INT, 0, kQueueReplyTag, comm, MPI_STATUS_IGNORE);
+    stats.scheduler_sec += now_seconds() - started;
+    return chunk_id;
+}
+
+QueuePhaseStats run_message_queue_column_phase(
+    const Args& args,
+    const std::vector<RowBlock>& chunks,
+    const std::vector<double>& v,
+    double global_min,
+    std::vector<double>& local_col,
+    int rank,
+    int size,
+    MPI_Comm comm
+) {
+    QueuePhaseStats stats;
+    if (rank == 0) {
+        serve_chunk_queue(chunks, size, comm, stats);
+        return stats;
+    }
+
+    std::vector<double> row_kernel(args.cols, 0.0);
+    while (true) {
+        const int chunk_id = request_chunk(comm, stats);
+        if (chunk_id < 0) {
+            break;
+        }
+        const RowBlock& chunk = chunks[chunk_id];
+        const double compute_started = now_seconds();
+        accumulate_chunk_columns(args, chunk, v, global_min, local_col, row_kernel);
+        stats.compute_sec += now_seconds() - compute_started;
+        stats.rows += block_rows(chunk);
+        stats.chunks += 1;
+    }
+    return stats;
+}
+
+QueuePhaseStats run_message_queue_final_phase(
+    const Args& args,
+    const std::vector<RowBlock>& chunks,
+    const std::vector<double>& v,
+    double global_min,
+    std::vector<double>& local_col,
+    int rank,
+    int size,
+    MPI_Comm comm
+) {
+    QueuePhaseStats stats;
+    if (rank == 0) {
+        serve_chunk_queue(chunks, size, comm, stats);
+        return stats;
+    }
+
+    std::vector<double> row_kernel(args.cols, 0.0);
+    while (true) {
+        const int chunk_id = request_chunk(comm, stats);
+        if (chunk_id < 0) {
+            break;
+        }
+        const RowBlock& chunk = chunks[chunk_id];
+        const double compute_started = now_seconds();
+        accumulate_chunk_final(
+            args,
+            chunk,
+            v,
+            global_min,
+            local_col,
+            row_kernel,
+            stats.row_error,
+            stats.objective
+        );
+        stats.compute_sec += now_seconds() - compute_started;
+        stats.rows += block_rows(chunk);
+        stats.chunks += 1;
+    }
+    return stats;
+}
+
 Result run_mpi_runtime_queue(
     const Args& args,
     MPI_Comm comm,
@@ -1091,12 +1099,7 @@ Result run_mpi_runtime_queue(
     double global_min = 0.0;
     MPI_Allreduce(&local_min, &global_min, 1, MPI_DOUBLE, MPI_MIN, comm);
 
-    int queue_counter = 0;
-    MPI_Win queue_window = MPI_WIN_NULL;
-    const bool use_rma_queue = size > 1;
-    if (use_rma_queue) {
-        MPI_Win_create(&queue_counter, sizeof(queue_counter), sizeof(int), MPI_INFO_NULL, comm, &queue_window);
-    }
+    const bool use_message_queue = size > 1;
 
     const double started = now_seconds();
     std::vector<double> v(args.cols, 1.0);
@@ -1112,16 +1115,15 @@ Result run_mpi_runtime_queue(
 
     for (int iteration = 1; iteration <= args.max_iters; ++iteration) {
         std::fill(local_col.begin(), local_col.end(), 0.0);
-        QueuePhaseStats phase = use_rma_queue
-            ? run_queue_column_phase(
+        QueuePhaseStats phase = use_message_queue
+            ? run_message_queue_column_phase(
                 args,
                 chunks,
                 v,
                 global_min,
                 local_col,
-                queue_counter,
-                queue_window,
                 rank,
+                size,
                 comm
             )
             : run_local_column_phase(args, chunks, v, global_min, local_col);
@@ -1142,16 +1144,15 @@ Result run_mpi_runtime_queue(
         result.iterations = iteration;
         if (iteration % args.check_every == 0 || iteration == args.max_iters) {
             std::fill(local_col.begin(), local_col.end(), 0.0);
-            QueuePhaseStats check = use_rma_queue
-                ? run_queue_final_phase(
+            QueuePhaseStats check = use_message_queue
+                ? run_message_queue_final_phase(
                     args,
                     chunks,
                     v,
                     global_min,
                     local_col,
-                    queue_counter,
-                    queue_window,
                     rank,
+                    size,
                     comm
                 )
                 : run_local_final_phase(args, chunks, v, global_min, local_col);
@@ -1174,16 +1175,15 @@ Result run_mpi_runtime_queue(
     }
 
     std::fill(local_col.begin(), local_col.end(), 0.0);
-    QueuePhaseStats final = use_rma_queue
-        ? run_queue_final_phase(
+    QueuePhaseStats final = use_message_queue
+        ? run_message_queue_final_phase(
             args,
             chunks,
             v,
             global_min,
             local_col,
-            queue_counter,
-            queue_window,
             rank,
+            size,
             comm
         )
         : run_local_final_phase(args, chunks, v, global_min, local_col);
@@ -1204,10 +1204,6 @@ Result run_mpi_runtime_queue(
     result.col_error = col_error;
     result.objective = objective;
     result.runtime_sec = now_seconds() - started;
-
-    if (use_rma_queue) {
-        MPI_Win_free(&queue_window);
-    }
 
     gather_rank_metrics(
         result,

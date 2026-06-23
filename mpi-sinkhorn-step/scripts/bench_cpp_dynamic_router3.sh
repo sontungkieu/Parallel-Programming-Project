@@ -9,6 +9,7 @@ HOSTFILE="${HOSTFILE:-$HOME/hosts_router_3}"
 HOST_LINES="${HOST_LINES:-192.168.1.25 slots=2
 192.168.1.26 slots=2
 192.168.1.75 slots=2}"
+WORKER_HOSTS="${WORKER_HOSTS:-192.168.1.26 192.168.1.75}"
 SSH_AGENT="${SSH_AGENT:-ssh -i /home/tung/.ssh/id_ed25519_mpi -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null}"
 if [ -z "${MPI_NET+x}" ]; then
   MPI_NET="--mca btl tcp,self --mca btl_tcp_if_include enp0s3 --mca oob_tcp_if_include enp0s3"
@@ -20,10 +21,16 @@ RUNTIME_SIZES="${RUNTIME_SIZES:-2000 4000}"
 RUNTIME_REPS="${RUNTIME_REPS:-2}"
 CHUNK_ROWS="${CHUNK_ROWS:-256}"
 ADAPT_ALPHA="${ADAPT_ALPHA:-0.5}"
+MANUAL_WEIGHTS="${MANUAL_WEIGHTS:-2,1,1}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-300}"
 
 mkdir -p "$LOG"
+rm -f "$OUT/failures.txt"
 make -C "$ROOT/cpp"
+for host in $WORKER_HOSTS; do
+  ssh -i /home/tung/.ssh/id_ed25519_mpi -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "tung@$host" "mkdir -p '$ROOT/cpp'"
+  rsync -az -e "$SSH_AGENT" "$BIN" "tung@$host:$BIN"
+done
 
 printf "%s\n" "$HOST_LINES" > "$HOSTFILE"
 cp "$HOSTFILE" "$OUT/hosts_router_3.txt"
@@ -82,11 +89,27 @@ PY
   echo "mpi_np=$NP"
   echo "chunk_rows=$CHUNK_ROWS"
   echo "adapt_alpha=$ADAPT_ALPHA"
+  echo "manual_weights=$MANUAL_WEIGHTS"
   echo "max_iters=50"
   echo "epsilon=0.1"
   echo "seed=0"
   echo "cost_mode=random"
 } > "$OUT/meta.txt"
+
+cat > "$OUT/run_manifest.md" <<EOF
+# Dynamic Router3 Run Manifest
+
+Cluster: \`.25/.26/.75\`, MPI \`np=$NP\`, fixed 50 Sinkhorn iterations, chunk rows \`$CHUNK_ROWS\`.
+
+| variant | partition mode | sizes | reps | weights | purpose |
+|---|---|---|---:|---|---|
+| seq | sequential | $SIZES | $REPS | n/a | Fresh sequential baseline on master |
+| contiguous | contiguous | $SIZES | $REPS | n/a | Backward-compatible MPI baseline |
+| weighted_equal | weighted-chunk | $SIZES | $REPS | equal | Chunk scheduler without hetero weighting |
+| weighted_manual_211 | weighted-chunk | $SIZES | $REPS | $MANUAL_WEIGHTS | Explicit CLI rank weights coverage |
+| weighted_adaptive | weighted-chunk | $SIZES | $REPS | learned across reps | Adaptive weight feedback coverage |
+| runtime_queue | runtime-queue | $RUNTIME_SIZES | $RUNTIME_REPS | equal | Experimental queue overhead/correctness smoke |
+EOF
 
 echo "SMOKE $(date -Is)" > "$OUT/progress.log"
 mpirun -np "$NP" --hostfile "$HOSTFILE" --map-by node $MPI_NET --mca plm_rsh_agent "$SSH_AGENT" hostname </dev/null > "$OUT/mpi_hostname_smoke.log" 2>&1 || {
@@ -181,6 +204,17 @@ for rep in $(seq 1 "$REPS"); do
   for n in $SIZES; do
     run_mpi_variant "weighted_equal" "weighted-chunk" "$n" "$rep" "$EQUAL_WEIGHTS"
   done
+  if [ "$(python3 - "$MANUAL_WEIGHTS" <<'PY'
+import sys
+print(len([x for x in sys.argv[1].split(',') if x.strip()]))
+PY
+)" -eq "$NP" ]; then
+    for n in $SIZES; do
+      run_mpi_variant "weighted_manual_211" "weighted-chunk" "$n" "$rep" "$MANUAL_WEIGHTS"
+    done
+  else
+    echo "SKIP weighted_manual_211 rep=$rep because manual weight count does not match NP=$NP" >> "$OUT/progress.log"
+  fi
   for n in $SIZES; do
     weights="${ADAPTIVE_WEIGHTS[$n]}"
     run_mpi_variant "weighted_adaptive" "weighted-chunk" "$n" "$rep" "$weights"
@@ -209,7 +243,7 @@ from pathlib import Path
 
 out = Path(sys.argv[1])
 np = int(sys.argv[2])
-pattern = re.compile(r"^(seq|contiguous|weighted_equal|weighted_adaptive|runtime_queue)_(\d+)(?:_np\d+)?_rep(\d+)\.json$")
+pattern = re.compile(r"^(seq|contiguous|weighted_equal|weighted_manual_211|weighted_adaptive|runtime_queue)_(\d+)(?:_np\d+)?_rep(\d+)\.json$")
 rows = []
 
 for path in sorted(out.glob("*.json")):
