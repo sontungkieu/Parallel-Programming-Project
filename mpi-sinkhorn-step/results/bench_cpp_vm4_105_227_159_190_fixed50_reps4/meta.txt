@@ -1,0 +1,15 @@
+benchmark=bench_cpp_vm4_105_227_159_190_fixed50_reps4
+started_at=2026-06-23T15:45:04+00:00
+root=/home/tung/Parallel-Programming-Project/mpi-sinkhorn-step
+binary=/home/tung/Parallel-Programming-Project/mpi-sinkhorn-step/cpp/sinkhorn_cpp
+hostfile=/home/tung/hosts4_105_227_159_190
+sizes=2000 3000 4000 5000 6000 7000 8000 9000 10000 11000 12000
+reps=4
+mpi_np=4
+map_by=node
+max_iters=50
+epsilon=0.1
+seed=0
+cost_mode=random
+hosts=.105,.227,.159,.190
+finished_runs_at=2026-06-23T15:55:07+00:00

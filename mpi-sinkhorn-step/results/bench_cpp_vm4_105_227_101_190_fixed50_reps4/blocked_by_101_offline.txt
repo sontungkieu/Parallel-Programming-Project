@@ -1,0 +1,5 @@
+Generated at 2026-06-23T04:02:01.085850+00:00
+4-machine MPI benchmark is incomplete because 192.168.1.101 became unreachable during mpi_7000_np4_rep2.
+Observed from master/local: ping failed and ssh returned No route to host.
+Completed sequential JSON: 44/44
+Completed MPI JSON: 16/44

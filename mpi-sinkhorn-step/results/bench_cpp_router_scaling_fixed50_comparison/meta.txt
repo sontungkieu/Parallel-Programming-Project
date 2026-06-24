@@ -1,0 +1,3 @@
+comparison=bench_cpp_router_scaling_fixed50_comparison
+inputs=bench_cpp_router2_25_26_fixed50_reps4,bench_cpp_router3_25_26_75_fixed50_reps4,bench_cpp_vm4_105_227_159_190_fixed50_reps4
+config=random cost seed 0, epsilon 0.1, fixed 50 iterations

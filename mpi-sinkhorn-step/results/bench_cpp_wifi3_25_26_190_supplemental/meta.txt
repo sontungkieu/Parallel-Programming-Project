@@ -1,0 +1,24 @@
+benchmark=bench_cpp_wifi3_25_26_190_supplemental
+started_at=2026-06-24T15:30:54+00:00
+root=/home/tung/Parallel-Programming-Project/mpi-sinkhorn-step
+binary=/home/tung/Parallel-Programming-Project/mpi-sinkhorn-step/cpp/sinkhorn_cpp
+hostfile=/home/tung/hosts_wifi3_25_26_190_slots3
+hosts=.25,.26,.190
+network=wifi3
+network_if=enp0s3
+host_slots=3
+supplemental_note=wifi3 run after master restart; hostfile uses three slots per node to allow np=8
+partial_note=all completed runs are summarized; failures, if any, are listed in failures.txt
+process_extra_size=8000
+process_extra_nps=8
+process_extra_reps=3
+speedup2n_size=16000
+speedup2n_nps=1 2 4 8
+speedup2n_reps=1
+size_probe_sizes=14000 16000 18000
+size_probe_np=3
+max_iters=50
+epsilon=0.1
+seed=0
+cost_mode=random
+finished_at=2026-06-24T15:35:17+00:00

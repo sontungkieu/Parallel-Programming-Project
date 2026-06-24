@@ -1,49 +1,46 @@
 # Parallel-Programming-Project
-2025.2 IT4130E Parallel and Distributed Programming Project
+
+2025.2 IT4130E Parallel and Distributed Programming Project.
+
+This repository contains the Sinkhorn optimal transport MPI project, including the
+original Python/mpi4py prototype, the final C++/MPI implementation, benchmark
+scripts, experiment outputs, report, and presentation slides.
 
 ## Branches
 
-| Branch | Purpose | Use when |
-|---|---|---|
-| `main` | Python MPI Sinkhorn MVP | You need the stable Python implementation, package structure, tests, and basic cluster demo. |
-| `codex/cpp-benchmark` | C++ MPI implementation, communication optimizations, benchmark tables, and charts | You need the faster C++ demo, fixed-iteration benchmark results, and final performance charts. |
-
-Recommended workflow:
-
-```bash
-git checkout main
-# Read the Python runbook for baseline setup and cluster smoke tests.
-
-git checkout codex/cpp-benchmark
-# Read the C++ runbook for optimized benchmarks and final demo charts.
-```
-
-For the final live demo, use Ubuntu VMs with bridged networking instead of WSL.
-The VM setup is documented in the runbooks below.
+| Branch | Purpose |
+|---|---|
+| `main` | Integrated project branch with Python prototype, C++ MPI solver, dynamic scheduling support, benchmark outputs, report, and slides. |
+| `cpp-benchmark` | Historical C++ benchmark/report branch. Merged into `main`. |
+| `dynamic-scheduling` | Historical dynamic scheduling branch. Merged into `main`. |
 
 ## Implementation
 
 - [MPI Sinkhorn Step MVP](mpi-sinkhorn-step/README.md)
 - [Python MPI cluster runbook](mpi-sinkhorn-step/PYTHON_CLUSTER_RUNBOOK.md)
+- [C++ MPI cluster runbook](mpi-sinkhorn-step/CPP_CLUSTER_RUNBOOK.md)
+- [C++ Sinkhorn source](mpi-sinkhorn-step/cpp/sinkhorn_cpp.cpp)
 - [Implementation summary](mpi_sinkhorn_mvp_implementation_report.md)
 
-## C++ Benchmark Branch
+## Final Report and Slides
 
-The C++ benchmark branch is not merged into `main`. Check it out explicitly:
+- [Final report PDF](mpi-sinkhorn-step/report/main.pdf)
+- [Final report LaTeX source](mpi-sinkhorn-step/report/main.tex)
+- [Presentation slides PDF](mpi-sinkhorn-step/report/slides.pdf)
+- [Presentation slides LaTeX source](mpi-sinkhorn-step/report/slides.tex)
+- [Slide speaker script](mpi-sinkhorn-step/report/slides_script.md)
 
-```bash
-git fetch origin
-git checkout codex/cpp-benchmark
-```
+## Benchmark Results
 
-Important files on `codex/cpp-benchmark`:
+Key result folders:
 
-- [C++ cluster runbook](https://github.com/sontungkieu/Parallel-Programming-Project/blob/codex/cpp-benchmark/mpi-sinkhorn-step/CPP_CLUSTER_RUNBOOK.md)
-- [C++ Sinkhorn source](https://github.com/sontungkieu/Parallel-Programming-Project/blob/codex/cpp-benchmark/mpi-sinkhorn-step/cpp/sinkhorn_cpp.cpp)
-- [Benchmark findings](https://github.com/sontungkieu/Parallel-Programming-Project/blob/codex/cpp-benchmark/mpi-sinkhorn-step/results/bench_cpp_vm2_sameband_variants_fixed50/findings.md)
-- [Benchmark charts](https://github.com/sontungkieu/Parallel-Programming-Project/blob/codex/cpp-benchmark/mpi-sinkhorn-step/results/bench_cpp_vm2_sameband_variants_fixed50/charts.md)
+- [Router 3-node report suite](mpi-sinkhorn-step/results/bench_cpp_router3_report_suite_safe)
+- [Router 3-node supplemental suite](mpi-sinkhorn-step/results/bench_cpp_router3_supplemental_after_ram)
+- [Wi-Fi 3-node report suite](mpi-sinkhorn-step/results/bench_cpp_wifi3_25_26_190_report_suite)
+- [Wi-Fi 3-node supplemental suite](mpi-sinkhorn-step/results/bench_cpp_wifi3_25_26_190_supplemental)
+- [Dynamic scheduling router suite](mpi-sinkhorn-step/results/bench_cpp_router3_dynamic_fixed50_reps4)
 
-## Reports
+## Archived Notes
 
 - [Archived MPI project topic report](old_mds/mpi_project_topic_report.md)
 - [Archived MPI SSAX project handoff](old_mds/mpi_ssax_project_handoff.md)
