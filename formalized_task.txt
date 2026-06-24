@@ -1,0 +1,173 @@
+Formalized Parallel Programming Project Task
+===========================================
+
+Source
+------
+- This file formalizes the requirements collected in task.txt.
+- Course project topic is self-suggested and may be modified later.
+
+Main Objective
+--------------
+Form a group of four students, set up an MPI cluster with at least three
+physical machines, and implement a non-trivial parallel algorithm on that
+cluster.
+
+The final grade depends on:
+- Difficulty and interest of the selected problem.
+- Quality of the parallelization strategy.
+- Whether the demo runs successfully.
+- Quality of the final report.
+- Whether all members understand the group's code.
+
+Cluster Requirements
+--------------------
+- The cluster must contain at least three physical machines.
+- Each physical machine may run at most one Linux virtual machine or one
+  Docker container.
+- If using a VM on Windows/macOS, configure the VM network with a bridged
+  adapter so the VMs can communicate over the same local network.
+- Cloud-only clusters such as AWS/GCP virtual servers are not accepted.
+  The professor explicitly said this can lose points because cluster setup is
+  considered part of the programming task.
+- A valid example setup is:
+  - Three physical Windows machines.
+  - One Ubuntu VM per physical machine.
+  - All machines connected through the same LAN or hotspot.
+  - MPI configured across the Ubuntu VMs.
+
+Implementation Requirements
+---------------------------
+- Implement the project code in C/C++.
+- The program must contain at least 250 lines of code per group member.
+  For a group of four, the expected minimum is about 1000 lines of code.
+- The parallel algorithm should run on the MPI cluster.
+- The implementation should be demoable, not only described theoretically.
+
+Submission Requirements
+-----------------------
+- Submit to the Teams Projects folder, inside a subfolder named with the group
+  ID.
+- Submit:
+  - One final report.
+  - One or more C/C++ source files.
+  - If dependencies are large, compress them before submission.
+- Fill in the group information in the shared course spreadsheet.
+
+Report Requirements
+-------------------
+- Report length: 10 to 20 pages.
+- Maximum report length: 20 pages.
+- Deadline from the course announcement: end of June 24.
+
+The report should explain:
+- Whether the parallelism is task-level or data-level.
+- Which decomposition technique is used:
+  - Data decomposition.
+  - Exploratory decomposition.
+  - Recursive decomposition.
+  - Speculative decomposition.
+  - Hybrid decomposition.
+- How work is assigned to processes/processors:
+  - For example, 1D partitioning.
+  - Or 2D block partitioning such as n/sqrt(p) by n/sqrt(p).
+- Communication strategy and topology:
+  - Blocking or non-blocking communication.
+  - Master-worker, ring, tree, hypercube, or another topology if applicable.
+- Load balancing considerations:
+  - Whether load balancing is used.
+  - Why the selected granularity is appropriate.
+- Pseudocode of the parallel algorithm.
+- Correctness validation:
+  - Explain how the parallel result is checked against the expected solution
+    or sequential baseline.
+
+Required Experimental Results
+-----------------------------
+1. Input-size calibration
+
+   Goal:
+   Find an input size N such that the full program runtime is about 2 to
+   3 minutes.
+
+   Setup:
+   - Use a number of MPI processes equal to the number of available physical
+     CPU cores, for example 3 machines times 4 cores equals 12 processes.
+   - Run the program on multiple input sizes.
+
+   Required plots:
+   - Runtime versus input size, including communication time.
+   - Runtime versus input size, excluding communication time if separately
+     measurable.
+
+2. Granularity and load-balance analysis
+
+   Goal:
+   Determine whether task/process granularity is suitable and whether the
+   cluster is balanced.
+
+   Setup:
+   - Use input size N from the calibration step.
+   - Use the number of MPI processes equal to the total available physical CPU
+     cores.
+
+   Required plot:
+   - Per-process runtime bar chart.
+   - Each process should be one bar.
+   - If possible, split each bar into computation time and communication time.
+
+   Interpretation:
+   - Evaluate whether the system is load-balanced.
+   - If the idle-time or runtime difference between any two processes exceeds
+     25%, adjust the granularity to be finer or coarser and explain the change.
+
+3. Speedup analysis
+
+   Goal:
+   Measure how performance scales as the number of processes changes.
+
+   Setup:
+   - Use input size 2N.
+   - Vary the number of MPI processes as 1, 2, 4, 8, and so on, up to the
+     available physical-core process count.
+
+   Required plots:
+   - Runtime versus process count, including communication time.
+   - Runtime versus process count, excluding communication time if separately
+     measurable.
+   - Speedup versus process count.
+   - Efficiency versus process count is recommended.
+
+Demo Requirements
+-----------------
+- The project is expected to have an offline demo.
+- A report is required.
+- The professor indicated that normally students should bring laptops and
+  reconfigure the cluster in class.
+- Remote access to a pre-configured PC cluster was accepted in the discussion,
+  especially when the cluster is hosted on PCs at home.
+
+Recommended Deliverables Checklist
+----------------------------------
+- MPI cluster setup notes:
+  - Hostnames/IPs.
+  - SSH setup.
+  - MPI hostfile.
+  - Network topology.
+- Source code:
+  - Sequential implementation.
+  - MPI implementation.
+  - Benchmark scripts.
+- Result files:
+  - Raw logs or reproducible benchmark outputs.
+  - Aggregated CSV tables.
+  - Figures for the report.
+- Report:
+  - Problem statement.
+  - Sequential algorithm.
+  - Parallel algorithm.
+  - Decomposition and mapping.
+  - Communication strategy.
+  - Load balancing and granularity.
+  - Correctness validation.
+  - Runtime, speedup, and efficiency results.
+  - Discussion of limitations and future improvements.
