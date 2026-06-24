@@ -41,9 +41,16 @@ struct Result {
     int column_syncs = 0;
     long long column_payload_bytes = 0;
     double runtime_sec = 0.0;
+    int local_rows = 0;
+    double local_compute_sec = 0.0;
+    double local_comm_sec = 0.0;
     double row_error = std::numeric_limits<double>::infinity();
     double col_error = std::numeric_limits<double>::infinity();
     double objective = std::numeric_limits<double>::infinity();
+    std::vector<int> local_rows_by_rank;
+    std::vector<double> rank_compute_sec;
+    std::vector<double> rank_comm_sec;
+    std::vector<double> rank_total_sec;
 };
 
 std::uint64_t splitmix64(std::uint64_t x) {
@@ -173,6 +180,28 @@ std::string json_escape(const std::string& value) {
     return escaped;
 }
 
+void write_int_array(std::ofstream& out, const std::vector<int>& values) {
+    out << "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out << ", ";
+        }
+        out << values[i];
+    }
+    out << "]";
+}
+
+void write_double_array(std::ofstream& out, const std::vector<double>& values) {
+    out << "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out << ", ";
+        }
+        out << values[i];
+    }
+    out << "]";
+}
+
 void write_json(
     const Args& args,
     const Result& result,
@@ -206,9 +235,21 @@ void write_json(
     out << "],\n";
     out << "  \"iterations\": " << result.iterations << ",\n";
     out << "  \"kernel_cutoff\": " << args.kernel_cutoff << ",\n";
+    out << "  \"local_rows_by_rank\": ";
+    write_int_array(out, result.local_rows_by_rank);
+    out << ",\n";
     out << "  \"max_iters\": " << args.max_iters << ",\n";
     out << "  \"num_processes\": " << num_processes << ",\n";
     out << "  \"quantization_scale\": " << args.quantization_scale << ",\n";
+    out << "  \"rank_comm_sec\": ";
+    write_double_array(out, result.rank_comm_sec);
+    out << ",\n";
+    out << "  \"rank_compute_sec\": ";
+    write_double_array(out, result.rank_compute_sec);
+    out << ",\n";
+    out << "  \"rank_total_sec\": ";
+    write_double_array(out, result.rank_total_sec);
+    out << ",\n";
     out << "  \"row_error\": " << result.row_error << ",\n";
     out << "  \"rows\": " << args.rows << ",\n";
     out << "  \"runtime_sec\": " << result.runtime_sec << ",\n";
@@ -317,6 +358,13 @@ Result run_sequential(const Args& args) {
     result.col_error = col_error;
     result.objective = objective;
     result.runtime_sec = now_seconds() - started;
+    result.local_rows = args.rows;
+    result.local_compute_sec = result.runtime_sec;
+    result.local_comm_sec = 0.0;
+    result.local_rows_by_rank = {args.rows};
+    result.rank_compute_sec = {result.runtime_sec};
+    result.rank_comm_sec = {0.0};
+    result.rank_total_sec = {result.runtime_sec};
     return result;
 }
 
@@ -346,6 +394,7 @@ void allreduce_columns(
     MPI_Comm comm,
     Result& result
 ) {
+    const double comm_started = now_seconds();
     if (args.comm_mode == "float32") {
         std::vector<float> send(local_col.size(), 0.0F);
         std::vector<float> recv(local_col.size(), 0.0F);
@@ -374,7 +423,64 @@ void allreduce_columns(
         MPI_Allreduce(local_col.data(), global_col.data(), static_cast<int>(global_col.size()), MPI_DOUBLE, MPI_SUM, comm);
         result.column_payload_bytes += static_cast<long long>(local_col.size() * sizeof(double));
     }
+    result.local_comm_sec += now_seconds() - comm_started;
     result.column_syncs += 1;
+}
+
+void gather_rank_metrics(Result& result, int local_rows, MPI_Comm comm, int rank, int size) {
+    const double local_total_sec = result.runtime_sec;
+    if (rank == 0) {
+        result.local_rows_by_rank.resize(size);
+        result.rank_compute_sec.resize(size);
+        result.rank_comm_sec.resize(size);
+        result.rank_total_sec.resize(size);
+    }
+    MPI_Gather(
+        &local_rows,
+        1,
+        MPI_INT,
+        rank == 0 ? result.local_rows_by_rank.data() : nullptr,
+        1,
+        MPI_INT,
+        0,
+        comm
+    );
+    MPI_Gather(
+        &result.local_compute_sec,
+        1,
+        MPI_DOUBLE,
+        rank == 0 ? result.rank_compute_sec.data() : nullptr,
+        1,
+        MPI_DOUBLE,
+        0,
+        comm
+    );
+    MPI_Gather(
+        &result.local_comm_sec,
+        1,
+        MPI_DOUBLE,
+        rank == 0 ? result.rank_comm_sec.data() : nullptr,
+        1,
+        MPI_DOUBLE,
+        0,
+        comm
+    );
+    MPI_Gather(
+        &local_total_sec,
+        1,
+        MPI_DOUBLE,
+        rank == 0 ? result.rank_total_sec.data() : nullptr,
+        1,
+        MPI_DOUBLE,
+        0,
+        comm
+    );
+
+    double max_runtime = 0.0;
+    MPI_Reduce(&local_total_sec, &max_runtime, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+    if (rank == 0) {
+        result.runtime_sec = max_runtime;
+    }
 }
 
 Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
@@ -387,7 +493,10 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
     MPI_Allreduce(&local_min, &global_min, 1, MPI_DOUBLE, MPI_MIN, comm);
 
     const double started = now_seconds();
+    Result result;
+    const double kernel_started = now_seconds();
     std::vector<double> local_kernel = build_kernel(local_cost, global_min, args.epsilon, args.kernel_cutoff);
+    result.local_compute_sec += now_seconds() - kernel_started;
     std::vector<double> local_u(local_rows, 1.0);
     std::vector<double> v(args.cols, 1.0);
     std::vector<double> local_col(args.cols, 0.0);
@@ -395,9 +504,10 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
 
     const double a_value = 1.0 / static_cast<double>(args.rows);
     const double b_value = 1.0 / static_cast<double>(args.cols);
-    Result result;
+    result.local_rows = local_rows;
 
     for (int iteration = 1; iteration <= args.max_iters; ++iteration) {
+        double compute_started = now_seconds();
         for (int i = 0; i < local_rows; ++i) {
             const std::size_t base = static_cast<std::size_t>(i) * args.cols;
             double sum = 0.0;
@@ -421,6 +531,7 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
                 }
             }
         }
+        result.local_compute_sec += now_seconds() - compute_started;
         const bool should_sync =
             args.comm_mode != "lazy" || iteration % args.sync_every == 0 || iteration == args.max_iters;
         if (should_sync) {
@@ -434,6 +545,7 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
         if (iteration % args.check_every == 0 || iteration == args.max_iters) {
             double local_row_error = 0.0;
             std::fill(local_col.begin(), local_col.end(), 0.0);
+            compute_started = now_seconds();
             for (int i = 0; i < local_rows; ++i) {
                 const std::size_t base = static_cast<std::size_t>(i) * args.cols;
                 const double ui = local_u[i];
@@ -448,9 +560,12 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
                 }
                 local_row_error += std::abs(row_mass - a_value);
             }
+            result.local_compute_sec += now_seconds() - compute_started;
             double row_error = 0.0;
+            double comm_started = now_seconds();
             MPI_Allreduce(&local_row_error, &row_error, 1, MPI_DOUBLE, MPI_SUM, comm);
             MPI_Allreduce(local_col.data(), global_col.data(), args.cols, MPI_DOUBLE, MPI_SUM, comm);
+            result.local_comm_sec += now_seconds() - comm_started;
             double col_error = 0.0;
             for (int j = 0; j < args.cols; ++j) {
                 col_error += std::abs(global_col[j] - b_value);
@@ -466,6 +581,7 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
     double local_row_error = 0.0;
     double local_objective = 0.0;
     std::fill(local_col.begin(), local_col.end(), 0.0);
+    double compute_started = now_seconds();
     for (int i = 0; i < local_rows; ++i) {
         const std::size_t base = static_cast<std::size_t>(i) * args.cols;
         const double ui = local_u[i];
@@ -481,11 +597,14 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
         }
         local_row_error += std::abs(row_mass - a_value);
     }
+    result.local_compute_sec += now_seconds() - compute_started;
     double row_error = 0.0;
     double objective = 0.0;
+    double comm_started = now_seconds();
     MPI_Allreduce(&local_row_error, &row_error, 1, MPI_DOUBLE, MPI_SUM, comm);
     MPI_Allreduce(&local_objective, &objective, 1, MPI_DOUBLE, MPI_SUM, comm);
     MPI_Allreduce(local_col.data(), global_col.data(), args.cols, MPI_DOUBLE, MPI_SUM, comm);
+    result.local_comm_sec += now_seconds() - comm_started;
 
     double col_error = 0.0;
     for (int j = 0; j < args.cols; ++j) {
@@ -495,6 +614,7 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
     result.col_error = col_error;
     result.objective = objective;
     result.runtime_sec = now_seconds() - started;
+    gather_rank_metrics(result, local_rows, comm, rank, size);
     return result;
 }
 
