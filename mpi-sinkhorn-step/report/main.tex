@@ -117,7 +117,7 @@ Runtime, speedup, efficiency & The report includes size sweep, process sweep, wo
 Nguyễn Tất Thanh & 20235560 & Cluster setup, SSH/OpenMPI configuration, router evidence collection \\
 Đặng Thịnh Tường Minh & 20235528 & Sequential baseline, correctness validation, Python vs C++ comparison \\
 Nguyễn Ngọc Minh & 20235533 & Load-balance analysis, compute/communication metrics, result visualization \\
-Kiều Sơn Tùng & 20235571 & MPI implementation, row-wise decomposition, benchmark run scripts \\
+Kiều Sơn Tùng & 20235571 & MPI implementation, row-wise decomposition, benchmark run scripts, and optimization experiments including communication variants and dynamic scheduling \\
 \bottomrule
 \end{tabularx}
 \caption{Team work allocation for implementation, experiments, and result analysis.}
@@ -300,19 +300,7 @@ The three machines were connected through the same Archer router. The VM adapter
 
 \begin{figure}[H]
 \centering
-\IfFileExists{assets/router_cluster_photo.jpg}{%
-  \includegraphics[height=6.2cm,keepaspectratio]{router_cluster_photo.jpg}%
-}{%
-\IfFileExists{assets/router_cluster_photo.png}{%
-  \includegraphics[height=6.2cm,keepaspectratio]{router_cluster_photo.png}%
-}{%
-  \fbox{\begin{minipage}[c][4cm][c]{0.86\linewidth}
-  \centering
-  Placeholder for the physical evidence photo.\\[0.2cm]
-  Insert a photo named \texttt{assets/router\_cluster\_photo.jpg} or \texttt{assets/router\_cluster\_photo.png}\\
-  showing the three laptops/PCs connected through one router.
-  \end{minipage}}
-}}
+\includegraphics[height=6.2cm,keepaspectratio]{router_cluster_photo.jpg}
 \caption{Three physical machines connected through one router for the MPI cluster.}
 \end{figure}
 
