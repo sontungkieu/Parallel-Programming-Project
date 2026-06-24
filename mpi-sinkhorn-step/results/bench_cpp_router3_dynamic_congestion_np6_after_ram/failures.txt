@@ -1,0 +1,4 @@
+FAIL contiguous n=8000 rep=3 rc=124 2026-06-24T12:03:59+00:00
+FAIL weighted_equal n=8000 rep=3 rc=124 2026-06-24T12:18:59+00:00
+FAIL weighted_manual_211 n=8000 rep=3 rc=124 2026-06-24T12:33:59+00:00
+FAIL weighted_adaptive n=8000 rep=3 rc=124 2026-06-24T12:48:59+00:00
