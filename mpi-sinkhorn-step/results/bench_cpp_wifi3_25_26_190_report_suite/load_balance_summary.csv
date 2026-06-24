@@ -1,0 +1,2 @@
+experiment,size,max_iters,np,count,mpi_avg_sec,avg_rank_imbalance_pct,avg_max_rank_compute_sec,avg_max_rank_comm_sec,avg_max_rank_overhead_sec
+load_balance,8000,50,3,3,4.485171927,0.20868755259200047,3.3580514283333343,2.197159085,0.0007784849999983301

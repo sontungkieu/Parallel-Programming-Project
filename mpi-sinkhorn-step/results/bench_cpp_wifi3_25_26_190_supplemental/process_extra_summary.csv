@@ -1,0 +1,2 @@
+size,max_iters,np,count,seq8000_avg_sec,mpi_avg_sec,speedup_vs_seq8000,efficiency,avg_rank_imbalance_pct,avg_max_rank_compute_sec,avg_max_rank_comm_sec
+8000,50,8,3,8.881357887250001,6.3212095249999996,1.4050092552896356,0.17562615691120445,0.3570215366666773,3.7651800663333317,5.1202613633333325

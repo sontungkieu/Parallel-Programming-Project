@@ -13,6 +13,13 @@ WORKER_HOSTS="${WORKER_HOSTS:-192.168.1.26 192.168.1.75}"
 HOST_LINES="${HOST_LINES:-192.168.1.25 slots=2
 192.168.1.26 slots=2
 192.168.1.75 slots=2}"
+BENCHMARK_NAME="${BENCHMARK_NAME:-bench_cpp_router3_report_suite_safe}"
+HOSTS_LABEL="${HOSTS_LABEL:-.25,.26,.75}"
+NETWORK_LABEL="${NETWORK_LABEL:-router_ethernet}"
+NETWORK_IF="${NETWORK_IF:-enp0s3}"
+HOST_SLOTS="${HOST_SLOTS:-2}"
+HOSTFILE_SNAPSHOT_NAME="${HOSTFILE_SNAPSHOT_NAME:-hosts_router_3_slots2.txt}"
+SAFETY_NOTE="${SAFETY_NOTE:-size calibration is capped at 12000 after node .75 soft-lockup during larger/more aggressive run}"
 
 if [ -z "${MPI_NET+x}" ]; then
   MPI_NET="--mca btl tcp,self --mca btl_tcp_if_include enp0s3 --mca oob_tcp_if_include enp0s3"
@@ -41,18 +48,18 @@ for host in $WORKER_HOSTS; do
 done
 
 printf "%s\n" "$HOST_LINES" > "$HOSTFILE"
-cp "$HOSTFILE" "$OUT/hosts_router_3_slots2.txt"
+cp "$HOSTFILE" "$OUT/$HOSTFILE_SNAPSHOT_NAME"
 {
-  echo "benchmark=bench_cpp_router3_report_suite_safe"
+  echo "benchmark=$BENCHMARK_NAME"
   echo "started_at=$(date -Is)"
   echo "root=$ROOT"
   echo "binary=$BIN"
   echo "hostfile=$HOSTFILE"
-  echo "hosts=.25,.26,.75"
-  echo "network=router_ethernet"
-  echo "network_if=enp0s3"
-  echo "host_slots=2"
-  echo "safety_note=size calibration is capped at 12000 after node .75 soft-lockup during larger/more aggressive run"
+  echo "hosts=$HOSTS_LABEL"
+  echo "network=$NETWORK_LABEL"
+  echo "network_if=$NETWORK_IF"
+  echo "host_slots=$HOST_SLOTS"
+  echo "safety_note=$SAFETY_NOTE"
   echo "baseline_sizes=$BASELINE_SIZES"
   echo "baseline_reps=$BASELINE_REPS"
   echo "baseline_np=$BASELINE_NP"
@@ -70,11 +77,11 @@ cp "$HOSTFILE" "$OUT/hosts_router_3_slots2.txt"
 } > "$OUT/meta.txt"
 
 {
-  echo "# Router3 Report Suite Manifest"
+  echo "# $BENCHMARK_NAME Manifest"
   echo
   echo "| experiment | config | purpose |"
   echo "|---|---|---|"
-  echo "| baseline | np=$BASELINE_NP, sizes=$BASELINE_SIZES, reps=$BASELINE_REPS, iters=$MAX_ITERS | Runtime vs input size on router |"
+  echo "| baseline | np=$BASELINE_NP, sizes=$BASELINE_SIZES, reps=$BASELINE_REPS, iters=$MAX_ITERS | Runtime vs input size on $NETWORK_LABEL |"
   echo "| process_sweep | size=$PROCESS_SIZE, np=$PROCESS_NPS, reps=$PROCESS_REPS, iters=$MAX_ITERS | Speedup/efficiency vs process count |"
   echo "| input_calibration | np=$BASELINE_NP, sizes=$INPUT_CALIBRATION_SIZES, reps=1, iters=$MAX_ITERS | Larger-size calibration within RAM limits |"
   echo "| workload_calibration | np=$BASELINE_NP, size=$PROCESS_SIZE, iters=$WORKLOAD_CALIBRATION_ITERS, reps=1 | 2-3 minute workload calibration without unsafe dense RAM growth |"

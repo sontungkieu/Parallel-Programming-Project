@@ -12,6 +12,14 @@ WORKER_HOSTS="${WORKER_HOSTS:-192.168.1.26 192.168.1.75}"
 HOST_LINES="${HOST_LINES:-192.168.1.25 slots=6
 192.168.1.26 slots=6
 192.168.1.75 slots=6}"
+BENCHMARK_NAME="${BENCHMARK_NAME:-bench_cpp_router3_supplemental_after_ram}"
+HOSTS_LABEL="${HOSTS_LABEL:-.25,.26,.75}"
+NETWORK_LABEL="${NETWORK_LABEL:-router_ethernet}"
+NETWORK_IF="${NETWORK_IF:-enp0s3}"
+HOST_SLOTS="${HOST_SLOTS:-6}"
+HOSTFILE_SNAPSHOT_NAME="${HOSTFILE_SNAPSHOT_NAME:-hosts_router_3_slots6.txt}"
+SUPPLEMENTAL_NOTE="${SUPPLEMENTAL_NOTE:-after RAM upgrade and 6GB swap per node}"
+PARTIAL_NOTE="${PARTIAL_NOTE:-the retained np=12 run at N=8000 is partial because the third repetition made the master VM stop accepting SSH; the table keeps the completed JSON files and exposes count}"
 if [ -z "${MPI_NET+x}" ]; then
   MPI_NET="--mca btl tcp,self --mca btl_tcp_if_include enp0s3 --mca oob_tcp_if_include enp0s3"
 fi
@@ -34,17 +42,19 @@ for host in $WORKER_HOSTS; do
 done
 
 printf "%s\n" "$HOST_LINES" > "$HOSTFILE"
-cp "$HOSTFILE" "$OUT/hosts_router_3_slots6.txt"
+cp "$HOSTFILE" "$OUT/$HOSTFILE_SNAPSHOT_NAME"
 {
-  echo "benchmark=bench_cpp_router3_supplemental_after_ram"
+  echo "benchmark=$BENCHMARK_NAME"
   echo "started_at=$(date -Is)"
   echo "root=$ROOT"
   echo "binary=$BIN"
   echo "hostfile=$HOSTFILE"
-  echo "hosts=.25,.26,.75"
-  echo "network=router_ethernet"
-  echo "network_if=enp0s3"
-  echo "host_slots=6"
+  echo "hosts=$HOSTS_LABEL"
+  echo "network=$NETWORK_LABEL"
+  echo "network_if=$NETWORK_IF"
+  echo "host_slots=$HOST_SLOTS"
+  echo "supplemental_note=$SUPPLEMENTAL_NOTE"
+  echo "partial_note=$PARTIAL_NOTE"
   echo "process_extra_size=8000"
   echo "process_extra_nps=$PROCESS_EXTRA_NPS"
   echo "process_extra_reps=$PROCESS_EXTRA_REPS"
@@ -60,7 +70,7 @@ cp "$HOSTFILE" "$OUT/hosts_router_3_slots6.txt"
 } > "$OUT/meta.txt"
 
 cat > "$OUT/run_manifest.md" <<EOF
-# Router3 Supplemental Manifest
+# $BENCHMARK_NAME Supplemental Manifest
 
 | group | config | purpose |
 |---|---|---|

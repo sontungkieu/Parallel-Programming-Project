@@ -92,6 +92,19 @@ def grouped(rows, keys):
     return groups
 
 
+def read_meta(out):
+    meta = {}
+    path = out / "meta.txt"
+    if not path.exists():
+        return meta
+    for line in path.read_text().splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        meta[key.strip()] = value.strip()
+    return meta
+
+
 def previous_seq_avg(previous, size):
     paths = sorted(previous.glob(f"baseline_seq_n{size}_iters50_rep*.json"))
     values = [float(json.loads(path.read_text())["runtime_sec"]) for path in paths]
@@ -203,18 +216,32 @@ def summarize_size_probe(rows):
 
 
 def markdown(out, process_extra, speedup2n, size_probe, workload_balance):
+    meta = read_meta(out)
+    benchmark = meta.get("benchmark", "bench_cpp_router3_supplemental_after_ram")
+    hosts = meta.get("hosts", ".25,.26,.75")
+    network = meta.get("network", "router_ethernet")
+    host_slots = meta.get("host_slots", "6")
+    note = meta.get("supplemental_note", "after RAM upgrade and 6GB swap per node")
+    partial_note = meta.get(
+        "partial_note",
+        "the retained np=12 run at N=8000 is partial because the third repetition made the master VM stop accepting SSH; the table keeps the completed JSON files and exposes count",
+    )
+    process_extra_nps = meta.get("process_extra_nps", "8")
+    speedup2n_nps = meta.get("speedup2n_nps", "1 2 4 8")
+    size_probe_sizes = meta.get("size_probe_sizes", "14000 16000 18000")
+    size_probe_np = meta.get("size_probe_np", "3")
     lines = [
-        "# C++ Sinkhorn Router3 Supplemental Experiments",
+        f"# C++ Sinkhorn {benchmark} Supplemental Experiments",
         "",
-        "Cluster: `192.168.1.25/.26/.75` over router Ethernet after RAM upgrade and 6GB swap per node.",
+        f"Cluster: `{hosts}` over `{network}` with `{host_slots}` slots per node; {note}.",
         "",
-        "This supplement covers the router experiments still missing after the first report suite:",
-        "- Extra process counts at `N=8000`: `np=8`; retained `np=12` partial runs are summarized when present.",
-        "- `2N` speedup at `N=16000`: sequential plus `np=1,2,4,8`.",
+        "This supplement covers the experiments still missing after the first report suite:",
+        f"- Extra process counts at `N=8000`: `np={process_extra_nps}`.",
+        f"- `2N` speedup at `N=16000`: sequential plus `np={speedup2n_nps}`.",
         "- Load-balance extraction at the report workload `N=8000`, `iters=2000`, `np=3`.",
-        "- Larger-size probe at `N=14000,16000,18000`, `np=3`.",
+        f"- Larger-size probe at `N={size_probe_sizes}`, `np={size_probe_np}`.",
         "",
-        "Note: the retained `np=12` run at `N=8000` is partial because the third repetition made the master VM stop accepting SSH; the table keeps the completed JSON files and exposes `count`.",
+        f"Note: {partial_note}.",
         "",
         "## Extra Process Counts At N=8000",
         "",

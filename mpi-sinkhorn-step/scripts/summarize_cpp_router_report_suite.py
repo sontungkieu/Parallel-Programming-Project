@@ -109,6 +109,19 @@ def grouped(rows, keys):
     return groups
 
 
+def read_meta(out):
+    meta = {}
+    path = out / "meta.txt"
+    if not path.exists():
+        return meta
+    for line in path.read_text().splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        meta[key.strip()] = value.strip()
+    return meta
+
+
 def build_baseline(rows):
     out = []
     seq_groups = grouped(
@@ -249,23 +262,37 @@ def build_load_balance_by_rank(rows):
 
 
 def write_markdown(out, baseline, process_sweep, input_calibration, workload_calibration, load_balance):
+    meta = read_meta(out)
+    benchmark = meta.get("benchmark", "bench_cpp_router3_report_suite_safe")
+    hosts = meta.get("hosts", ".25,.26,.75")
+    network = meta.get("network", "router_ethernet")
+    host_slots = meta.get("host_slots", "2")
+    safety_note = meta.get(
+        "safety_note",
+        "size calibration is capped at 12000 after node .75 soft-lockup during larger/more aggressive run",
+    )
+    baseline_np = meta.get("baseline_np") or (str(baseline[0]["np"]) if baseline else "3")
+    baseline_sizes = meta.get("baseline_sizes", "2000 3000 4000 5000 6000 7000 8000 9000 10000 11000 12000")
+    process_nps = meta.get("process_nps", "1 2 3 4 6")
+    input_sizes = meta.get("input_calibration_sizes", "8000 10000 12000")
+    workload_iters = meta.get("workload_calibration_iters", "200 500 1000 2000")
     lines = [
-        "# C++ Sinkhorn Router3 Report Experiment Suite",
+        f"# C++ Sinkhorn {benchmark} Report Experiment Suite",
         "",
-        "Cluster: `192.168.1.25/.26/.75` over router Ethernet. Hostfile uses the safe two-slot-per-node profile.",
+        f"Cluster: `{hosts}` over `{network}`. Hostfile uses `{host_slots}` slots per node.",
         "",
         "Experiments covered:",
-        "- Baseline size sweep: `np=3`, sizes `2000..12000`, fixed 50 iterations, 4 reps.",
-        "- Process sweep: several `np` values up to the safe slots limit, fixed 50 iterations, 3 reps.",
-        "- Input-size calibration: safe dense sizes up to `12000`, fixed 50 iterations, 1 rep.",
-        "- Workload calibration: `np=3`, fixed size with longer iteration counts, 1 rep.",
+        f"- Baseline size sweep: `np={baseline_np}`, sizes `{baseline_sizes}`, fixed 50 iterations, 4 reps.",
+        f"- Process sweep: `np={process_nps}`, fixed 50 iterations, 3 reps.",
+        f"- Input-size calibration: sizes `{input_sizes}`, fixed 50 iterations, 1 rep.",
+        f"- Workload calibration: `np={baseline_np}`, iteration counts `{workload_iters}`, 1 rep.",
         "- Load balance and compute/communication breakdown from per-rank metrics.",
         "",
-        "Safety note: larger dense-size and 12-process attempts were stopped after node `.75` reported a kernel soft lockup. This suite caps memory pressure and uses longer iteration counts for the 2-3 minute workload target.",
+        f"Safety note: {safety_note}.",
         "",
         "## Baseline Size Sweep",
         "",
-        "| size | seq avg s | mpi np3 avg s | speedup | efficiency | avg imbalance % | max obj diff |",
+        f"| size | seq avg s | mpi np{baseline_np} avg s | speedup | efficiency | avg imbalance % | max obj diff |",
         "|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in baseline:
