@@ -50,6 +50,7 @@ struct Result {
     long long column_payload_bytes = 0;
     double runtime_sec = 0.0;
     double queue_scheduler_sec = 0.0;
+    double local_comm_sec = 0.0;
     double row_error = std::numeric_limits<double>::infinity();
     double col_error = std::numeric_limits<double>::infinity();
     double objective = std::numeric_limits<double>::infinity();
@@ -57,6 +58,8 @@ struct Result {
     std::vector<long long> local_rows_by_rank;
     std::vector<int> local_chunks_by_rank;
     std::vector<double> rank_compute_sec;
+    std::vector<double> rank_comm_sec;
+    std::vector<double> rank_total_sec;
     std::vector<double> rank_rows_per_sec;
     std::vector<double> suggested_rank_weights;
     std::vector<int> queue_chunks_by_rank;
@@ -486,6 +489,12 @@ void write_json(
     out << "  \"rank_compute_sec\": ";
     write_double_array(out, result.rank_compute_sec);
     out << ",\n";
+    out << "  \"rank_comm_sec\": ";
+    write_double_array(out, result.rank_comm_sec);
+    out << ",\n";
+    out << "  \"rank_total_sec\": ";
+    write_double_array(out, result.rank_total_sec);
+    out << ",\n";
     out << "  \"rank_rows_per_sec\": ";
     write_double_array(out, result.rank_rows_per_sec);
     out << ",\n";
@@ -635,6 +644,7 @@ void allreduce_columns(
     MPI_Comm comm,
     Result& result
 ) {
+    const double comm_started = now_seconds();
     if (args.comm_mode == "float32") {
         std::vector<float> send(local_col.size(), 0.0F);
         std::vector<float> recv(local_col.size(), 0.0F);
@@ -663,6 +673,7 @@ void allreduce_columns(
         MPI_Allreduce(local_col.data(), global_col.data(), static_cast<int>(global_col.size()), MPI_DOUBLE, MPI_SUM, comm);
         result.column_payload_bytes += static_cast<long long>(local_col.size() * sizeof(double));
     }
+    result.local_comm_sec += now_seconds() - comm_started;
     result.column_syncs += 1;
 }
 
@@ -672,6 +683,8 @@ void gather_rank_metrics(
     long long rows_field,
     int chunks_field,
     double local_compute_sec,
+    double local_comm_sec,
+    double local_total_sec,
     long long processed_rows,
     int queue_chunks,
     double scheduler_sec,
@@ -687,6 +700,8 @@ void gather_rank_metrics(
         result.local_rows_by_rank.resize(size);
         result.local_chunks_by_rank.resize(size);
         result.rank_compute_sec.resize(size);
+        result.rank_comm_sec.resize(size);
+        result.rank_total_sec.resize(size);
         result.rank_rows_per_sec.resize(size);
         result.queue_chunks_by_rank.resize(size);
     }
@@ -694,13 +709,18 @@ void gather_rank_metrics(
     MPI_Gather(&rows_field, 1, MPI_LONG_LONG, result.local_rows_by_rank.data(), 1, MPI_LONG_LONG, 0, comm);
     MPI_Gather(&chunks_field, 1, MPI_INT, result.local_chunks_by_rank.data(), 1, MPI_INT, 0, comm);
     MPI_Gather(&local_compute_sec, 1, MPI_DOUBLE, result.rank_compute_sec.data(), 1, MPI_DOUBLE, 0, comm);
+    MPI_Gather(&local_comm_sec, 1, MPI_DOUBLE, result.rank_comm_sec.data(), 1, MPI_DOUBLE, 0, comm);
+    MPI_Gather(&local_total_sec, 1, MPI_DOUBLE, result.rank_total_sec.data(), 1, MPI_DOUBLE, 0, comm);
     MPI_Gather(&local_rows_per_sec, 1, MPI_DOUBLE, result.rank_rows_per_sec.data(), 1, MPI_DOUBLE, 0, comm);
     MPI_Gather(&queue_chunks, 1, MPI_INT, result.queue_chunks_by_rank.data(), 1, MPI_INT, 0, comm);
 
     double max_scheduler_sec = 0.0;
+    double max_total_sec = 0.0;
     MPI_Reduce(&scheduler_sec, &max_scheduler_sec, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+    MPI_Reduce(&local_total_sec, &max_total_sec, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
     if (rank == 0) {
         result.queue_scheduler_sec = max_scheduler_sec;
+        result.runtime_sec = max_total_sec;
         result.suggested_rank_weights = suggest_rank_weights(result.rank_rows_per_sec);
     }
 }
@@ -794,8 +814,10 @@ Result run_mpi_static(
             local_compute_sec += now_seconds() - compute_started;
 
             double row_error = 0.0;
+            const double comm_started = now_seconds();
             MPI_Allreduce(&local_row_error, &row_error, 1, MPI_DOUBLE, MPI_SUM, comm);
             MPI_Allreduce(local_col.data(), global_col.data(), args.cols, MPI_DOUBLE, MPI_SUM, comm);
+            result.local_comm_sec += now_seconds() - comm_started;
             double col_error = 0.0;
             for (int j = 0; j < args.cols; ++j) {
                 col_error += std::abs(global_col[j] - b_value);
@@ -831,9 +853,11 @@ Result run_mpi_static(
 
     double row_error = 0.0;
     double objective = 0.0;
+    double comm_started = now_seconds();
     MPI_Allreduce(&local_row_error, &row_error, 1, MPI_DOUBLE, MPI_SUM, comm);
     MPI_Allreduce(&local_objective, &objective, 1, MPI_DOUBLE, MPI_SUM, comm);
     MPI_Allreduce(local_col.data(), global_col.data(), args.cols, MPI_DOUBLE, MPI_SUM, comm);
+    result.local_comm_sec += now_seconds() - comm_started;
 
     double col_error = 0.0;
     for (int j = 0; j < args.cols; ++j) {
@@ -852,6 +876,8 @@ Result run_mpi_static(
         local_rows,
         local_chunks,
         local_compute_sec,
+        result.local_comm_sec,
+        result.runtime_sec,
         processed_rows,
         0,
         0.0,
@@ -1160,8 +1186,10 @@ Result run_mpi_runtime_queue(
             local_scheduler_sec += check.scheduler_sec;
 
             double row_error = 0.0;
+            const double comm_started = now_seconds();
             MPI_Allreduce(&check.row_error, &row_error, 1, MPI_DOUBLE, MPI_SUM, comm);
             MPI_Allreduce(local_col.data(), global_col.data(), args.cols, MPI_DOUBLE, MPI_SUM, comm);
+            result.local_comm_sec += now_seconds() - comm_started;
             double col_error = 0.0;
             for (int j = 0; j < args.cols; ++j) {
                 col_error += std::abs(global_col[j] - b_value);
@@ -1192,9 +1220,11 @@ Result run_mpi_runtime_queue(
 
     double row_error = 0.0;
     double objective = 0.0;
+    double comm_started = now_seconds();
     MPI_Allreduce(&final.row_error, &row_error, 1, MPI_DOUBLE, MPI_SUM, comm);
     MPI_Allreduce(&final.objective, &objective, 1, MPI_DOUBLE, MPI_SUM, comm);
     MPI_Allreduce(local_col.data(), global_col.data(), args.cols, MPI_DOUBLE, MPI_SUM, comm);
+    result.local_comm_sec += now_seconds() - comm_started;
 
     double col_error = 0.0;
     for (int j = 0; j < args.cols; ++j) {
@@ -1211,6 +1241,8 @@ Result run_mpi_runtime_queue(
         processed_rows,
         processed_chunks,
         local_compute_sec,
+        result.local_comm_sec,
+        result.runtime_sec,
         processed_rows,
         processed_chunks,
         local_scheduler_sec,
