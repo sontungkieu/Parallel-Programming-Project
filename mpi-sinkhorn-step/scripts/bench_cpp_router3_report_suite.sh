@@ -37,6 +37,9 @@ LOAD_BALANCE_NP="${LOAD_BALANCE_NP:-6}"
 LOAD_BALANCE_REPS="${LOAD_BALANCE_REPS:-3}"
 MAX_ITERS="${MAX_ITERS:-50}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-1200}"
+PARTITION_MODE="${PARTITION_MODE:-contiguous}"
+CHUNK_ROWS="${CHUNK_ROWS:-256}"
+RANK_WEIGHTS="${RANK_WEIGHTS:-}"
 
 mkdir -p "$LOG" "$ROOT/scripts"
 rm -f "$OUT/failures.txt"
@@ -74,6 +77,9 @@ cp "$HOSTFILE" "$OUT/$HOSTFILE_SNAPSHOT_NAME"
   echo "epsilon=0.1"
   echo "seed=0"
   echo "cost_mode=random"
+  echo "partition_mode=$PARTITION_MODE"
+  echo "chunk_rows=$CHUNK_ROWS"
+  echo "rank_weights=$RANK_WEIGHTS"
 } > "$OUT/meta.txt"
 
 {
@@ -86,6 +92,8 @@ cp "$HOSTFILE" "$OUT/$HOSTFILE_SNAPSHOT_NAME"
   echo "| input_calibration | np=$BASELINE_NP, sizes=$INPUT_CALIBRATION_SIZES, reps=1, iters=$MAX_ITERS | Larger-size calibration within RAM limits |"
   echo "| workload_calibration | np=$BASELINE_NP, size=$PROCESS_SIZE, iters=$WORKLOAD_CALIBRATION_ITERS, reps=1 | 2-3 minute workload calibration without unsafe dense RAM growth |"
   echo "| load_balance | np=$LOAD_BALANCE_NP, size=$PROCESS_SIZE, reps=$LOAD_BALANCE_REPS, iters=$MAX_ITERS | Per-rank granularity/load-balance snapshot |"
+  echo
+  echo "Dynamic partition config: \`PARTITION_MODE=$PARTITION_MODE\`, \`CHUNK_ROWS=$CHUNK_ROWS\`, \`RANK_WEIGHTS=$RANK_WEIGHTS\`."
 } > "$OUT/run_manifest.md"
 
 echo "SMOKE $(date -Is)" > "$OUT/progress.log"
@@ -126,6 +134,20 @@ run_mpi() {
   local json="$OUT/${experiment}_mpi_n${n}_np${np}_iters${iters}_rep${rep}.json"
   local log="$LOG/${experiment}_mpi_n${n}_np${np}_iters${iters}_rep${rep}.log"
   local rc=0
+  local weight_args=()
+  if [ -n "$RANK_WEIGHTS" ]; then
+    local weight_count
+    weight_count="$(python3 - "$RANK_WEIGHTS" <<'PY'
+import sys
+print(len([x for x in sys.argv[1].split(',') if x.strip()]))
+PY
+)"
+    if [ "$weight_count" -eq "$np" ]; then
+      weight_args=(--rank-weights "$RANK_WEIGHTS")
+    else
+      echo "NOTE skip rank weights for $experiment n=$n np=$np because weight_count=$weight_count $(date -Is)" >> "$OUT/progress.log"
+    fi
+  fi
   if [ -s "$json" ]; then
     echo "SKIP $experiment mpi n=$n np=$np iters=$iters rep=$rep $(date -Is)" >> "$OUT/progress.log"
     return 0
@@ -139,13 +161,14 @@ run_mpi() {
     echo "max_iters=$iters"
     echo "rep=$rep"
     echo "start=$(date -Is)"
-    echo "cmd=mpirun -np $np --hostfile $HOSTFILE --map-by node $MPI_NET --mca plm_rsh_agent $SSH_AGENT $BIN --mode mpi --rows $n --cols $n --cost-mode random --seed 0 --epsilon 0.1 --max-iters $iters --tol 0 --check-every $iters --comm-mode double --output $json"
+    echo "cmd=mpirun -np $np --hostfile $HOSTFILE --map-by node $MPI_NET --mca plm_rsh_agent $SSH_AGENT $BIN --mode mpi --rows $n --cols $n --cost-mode random --seed 0 --epsilon 0.1 --max-iters $iters --tol 0 --check-every $iters --comm-mode double --partition-mode $PARTITION_MODE --chunk-rows $CHUNK_ROWS ${weight_args[*]} --output $json"
     /usr/bin/time -f "wall_clock_sec=%e max_rss_kb=%M" timeout -k 20s "$TIMEOUT_SEC" \
       mpirun -np "$np" --hostfile "$HOSTFILE" --map-by node $MPI_NET \
       --mca plm_rsh_agent "$SSH_AGENT" \
       "$BIN" --mode mpi --rows "$n" --cols "$n" --cost-mode random --seed 0 \
       --epsilon 0.1 --max-iters "$iters" --tol 0 --check-every "$iters" \
-      --comm-mode double --output "$json" </dev/null
+      --comm-mode double --partition-mode "$PARTITION_MODE" --chunk-rows "$CHUNK_ROWS" \
+      "${weight_args[@]}" --output "$json" </dev/null
     rc=$?
     echo "exit_code=$rc"
     echo "end=$(date -Is)"

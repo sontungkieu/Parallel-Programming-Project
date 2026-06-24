@@ -1,6 +1,7 @@
 #include <mpi.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -10,14 +11,18 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace {
 
 constexpr double kTiny = 1e-12;
+constexpr int kQueueRequestTag = 4101;
+constexpr int kQueueReplyTag = 4102;
 
 struct Args {
     std::string mode = "sequential";
@@ -33,6 +38,9 @@ struct Args {
     int sync_every = 1;
     double kernel_cutoff = 0.0;
     double quantization_scale = 1e10;
+    std::string partition_mode = "contiguous";
+    int chunk_rows = 256;
+    std::vector<double> rank_weights;
     std::string output;
 };
 
@@ -41,16 +49,40 @@ struct Result {
     int column_syncs = 0;
     long long column_payload_bytes = 0;
     double runtime_sec = 0.0;
-    int local_rows = 0;
-    double local_compute_sec = 0.0;
+    double queue_scheduler_sec = 0.0;
     double local_comm_sec = 0.0;
     double row_error = std::numeric_limits<double>::infinity();
     double col_error = std::numeric_limits<double>::infinity();
     double objective = std::numeric_limits<double>::infinity();
-    std::vector<int> local_rows_by_rank;
+    std::vector<double> effective_rank_weights;
+    std::vector<long long> local_rows_by_rank;
+    std::vector<int> local_chunks_by_rank;
     std::vector<double> rank_compute_sec;
     std::vector<double> rank_comm_sec;
     std::vector<double> rank_total_sec;
+    std::vector<double> rank_rows_per_sec;
+    std::vector<double> suggested_rank_weights;
+    std::vector<int> queue_chunks_by_rank;
+};
+
+struct RowBlock {
+    int start = 0;
+    int end = 0;
+};
+
+struct PartitionPlan {
+    std::vector<RowBlock> local_blocks;
+    std::vector<long long> rows_by_rank;
+    std::vector<int> chunks_by_rank;
+};
+
+struct QueuePhaseStats {
+    long long rows = 0;
+    int chunks = 0;
+    double compute_sec = 0.0;
+    double scheduler_sec = 0.0;
+    double row_error = 0.0;
+    double objective = 0.0;
 };
 
 std::uint64_t splitmix64(std::uint64_t x) {
@@ -107,6 +139,158 @@ std::pair<int, int> split_range(int rows, int size, int rank) {
     return {start, start + width};
 }
 
+int block_rows(const RowBlock& block) {
+    return block.end - block.start;
+}
+
+std::vector<RowBlock> build_row_chunks(int rows, int chunk_rows) {
+    std::vector<RowBlock> chunks;
+    for (int start = 0; start < rows; start += chunk_rows) {
+        chunks.push_back({start, std::min(start + chunk_rows, rows)});
+    }
+    return chunks;
+}
+
+std::string strip_spaces(std::string value) {
+    value.erase(
+        std::remove_if(
+            value.begin(),
+            value.end(),
+            [](unsigned char ch) { return std::isspace(ch) != 0; }
+        ),
+        value.end()
+    );
+    return value;
+}
+
+std::vector<double> parse_double_csv(const std::string& csv) {
+    std::vector<double> values;
+    std::stringstream input(csv);
+    std::string token;
+    while (std::getline(input, token, ',')) {
+        token = strip_spaces(token);
+        if (token.empty()) {
+            throw std::runtime_error("--rank-weights contains an empty value");
+        }
+        std::size_t parsed = 0;
+        const double value = std::stod(token, &parsed);
+        if (parsed != token.size() || !std::isfinite(value) || value <= 0.0) {
+            throw std::runtime_error("--rank-weights values must be positive finite numbers");
+        }
+        values.push_back(value);
+    }
+    if (values.empty()) {
+        throw std::runtime_error("--rank-weights cannot be empty");
+    }
+    return values;
+}
+
+std::vector<double> resolve_rank_weights(const Args& args, int size) {
+    if (args.rank_weights.empty()) {
+        return std::vector<double>(size, 1.0);
+    }
+    if (static_cast<int>(args.rank_weights.size()) != size) {
+        throw std::runtime_error("--rank-weights length must match the MPI process count");
+    }
+    return args.rank_weights;
+}
+
+std::string double_csv(const std::vector<double>& values) {
+    std::ostringstream out;
+    out << std::setprecision(10);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out << ",";
+        }
+        out << values[i];
+    }
+    return out.str();
+}
+
+std::vector<double> suggest_rank_weights(const std::vector<double>& rows_per_sec) {
+    if (rows_per_sec.empty()) {
+        return {};
+    }
+
+    double positive_sum = 0.0;
+    int positive_count = 0;
+    for (double value : rows_per_sec) {
+        if (value > 0.0 && std::isfinite(value)) {
+            positive_sum += value;
+            positive_count += 1;
+        }
+    }
+    if (positive_count == 0) {
+        return std::vector<double>(rows_per_sec.size(), 1.0);
+    }
+
+    const double mean = positive_sum / static_cast<double>(positive_count);
+    std::vector<double> suggested(rows_per_sec.size(), 1.0);
+    for (std::size_t i = 0; i < rows_per_sec.size(); ++i) {
+        suggested[i] = rows_per_sec[i] > 0.0 && std::isfinite(rows_per_sec[i])
+            ? std::max(0.05, rows_per_sec[i] / mean)
+            : 0.05;
+    }
+
+    const double suggested_mean =
+        std::accumulate(suggested.begin(), suggested.end(), 0.0) / static_cast<double>(suggested.size());
+    for (double& value : suggested) {
+        value /= suggested_mean;
+    }
+    return suggested;
+}
+
+PartitionPlan build_partition_plan(
+    const Args& args,
+    int rank,
+    int size,
+    const std::vector<double>& weights
+) {
+    PartitionPlan plan;
+    plan.rows_by_rank.assign(size, 0);
+    plan.chunks_by_rank.assign(size, 0);
+
+    if (args.partition_mode == "contiguous") {
+        for (int r = 0; r < size; ++r) {
+            const auto [start, end] = split_range(args.rows, size, r);
+            const int width = end - start;
+            plan.rows_by_rank[r] = width;
+            plan.chunks_by_rank[r] = width > 0 ? 1 : 0;
+            if (r == rank && width > 0) {
+                plan.local_blocks.push_back({start, end});
+            }
+        }
+        return plan;
+    }
+
+    if (args.partition_mode != "weighted-chunk") {
+        throw std::runtime_error("static partition builder only supports contiguous or weighted-chunk");
+    }
+
+    const std::vector<RowBlock> chunks = build_row_chunks(args.rows, args.chunk_rows);
+    std::vector<double> assigned_score(size, 0.0);
+    for (const RowBlock& chunk : chunks) {
+        int best_rank = 0;
+        double best_score = assigned_score[0] / weights[0];
+        for (int r = 1; r < size; ++r) {
+            const double score = assigned_score[r] / weights[r];
+            if (score < best_score - 1e-12) {
+                best_score = score;
+                best_rank = r;
+            }
+        }
+
+        const int rows = block_rows(chunk);
+        assigned_score[best_rank] += static_cast<double>(rows);
+        plan.rows_by_rank[best_rank] += rows;
+        plan.chunks_by_rank[best_rank] += 1;
+        if (best_rank == rank) {
+            plan.local_blocks.push_back(chunk);
+        }
+    }
+    return plan;
+}
+
 std::vector<double> build_cost_block(
     int global_start,
     int local_rows,
@@ -123,6 +307,49 @@ std::vector<double> build_cost_block(
         }
     }
     return cost;
+}
+
+std::vector<double> build_cost_blocks(
+    const std::vector<RowBlock>& blocks,
+    int rows,
+    int cols,
+    const std::string& mode,
+    std::uint64_t seed
+) {
+    long long local_rows = 0;
+    for (const RowBlock& block : blocks) {
+        local_rows += block_rows(block);
+    }
+
+    std::vector<double> cost(static_cast<std::size_t>(local_rows) * cols);
+    std::size_t local_index = 0;
+    for (const RowBlock& block : blocks) {
+        for (int row = block.start; row < block.end; ++row) {
+            for (int j = 0; j < cols; ++j) {
+                cost[local_index * static_cast<std::size_t>(cols) + j] =
+                    cost_value(row, j, rows, cols, mode, seed);
+            }
+            local_index += 1;
+        }
+    }
+    return cost;
+}
+
+double min_cost_range(
+    int start,
+    int end,
+    int rows,
+    int cols,
+    const std::string& mode,
+    std::uint64_t seed
+) {
+    double minimum = std::numeric_limits<double>::infinity();
+    for (int row = start; row < end; ++row) {
+        for (int col = 0; col < cols; ++col) {
+            minimum = std::min(minimum, cost_value(row, col, rows, cols, mode, seed));
+        }
+    }
+    return minimum;
 }
 
 double min_value(const std::vector<double>& values) {
@@ -180,7 +407,7 @@ std::string json_escape(const std::string& value) {
     return escaped;
 }
 
-void write_int_array(std::ofstream& out, const std::vector<int>& values) {
+void write_double_array(std::ostream& out, const std::vector<double>& values) {
     out << "[";
     for (std::size_t i = 0; i < values.size(); ++i) {
         if (i != 0) {
@@ -191,7 +418,18 @@ void write_int_array(std::ofstream& out, const std::vector<int>& values) {
     out << "]";
 }
 
-void write_double_array(std::ofstream& out, const std::vector<double>& values) {
+void write_int_array(std::ostream& out, const std::vector<int>& values) {
+    out << "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out << ", ";
+        }
+        out << values[i];
+    }
+    out << "]";
+}
+
+void write_long_long_array(std::ostream& out, const std::vector<long long>& values) {
     out << "[";
     for (std::size_t i = 0; i < values.size(); ++i) {
         if (i != 0) {
@@ -235,21 +473,40 @@ void write_json(
     out << "],\n";
     out << "  \"iterations\": " << result.iterations << ",\n";
     out << "  \"kernel_cutoff\": " << args.kernel_cutoff << ",\n";
-    out << "  \"local_rows_by_rank\": ";
-    write_int_array(out, result.local_rows_by_rank);
-    out << ",\n";
     out << "  \"max_iters\": " << args.max_iters << ",\n";
     out << "  \"num_processes\": " << num_processes << ",\n";
-    out << "  \"quantization_scale\": " << args.quantization_scale << ",\n";
-    out << "  \"rank_comm_sec\": ";
-    write_double_array(out, result.rank_comm_sec);
+    out << "  \"partition_mode\": \"" << json_escape(args.partition_mode) << "\",\n";
+    out << "  \"chunk_rows\": " << args.chunk_rows << ",\n";
+    out << "  \"rank_weights\": ";
+    write_double_array(out, result.effective_rank_weights);
+    out << ",\n";
+    out << "  \"local_rows_by_rank\": ";
+    write_long_long_array(out, result.local_rows_by_rank);
+    out << ",\n";
+    out << "  \"local_chunks_by_rank\": ";
+    write_int_array(out, result.local_chunks_by_rank);
     out << ",\n";
     out << "  \"rank_compute_sec\": ";
     write_double_array(out, result.rank_compute_sec);
     out << ",\n";
+    out << "  \"rank_comm_sec\": ";
+    write_double_array(out, result.rank_comm_sec);
+    out << ",\n";
     out << "  \"rank_total_sec\": ";
     write_double_array(out, result.rank_total_sec);
     out << ",\n";
+    out << "  \"rank_rows_per_sec\": ";
+    write_double_array(out, result.rank_rows_per_sec);
+    out << ",\n";
+    out << "  \"suggested_rank_weights\": ";
+    write_double_array(out, result.suggested_rank_weights);
+    out << ",\n";
+    out << "  \"suggested_rank_weights_csv\": \"" << json_escape(double_csv(result.suggested_rank_weights)) << "\",\n";
+    out << "  \"queue_chunks_by_rank\": ";
+    write_int_array(out, result.queue_chunks_by_rank);
+    out << ",\n";
+    out << "  \"queue_scheduler_sec\": " << result.queue_scheduler_sec << ",\n";
+    out << "  \"quantization_scale\": " << args.quantization_scale << ",\n";
     out << "  \"row_error\": " << result.row_error << ",\n";
     out << "  \"rows\": " << args.rows << ",\n";
     out << "  \"runtime_sec\": " << result.runtime_sec << ",\n";
@@ -358,13 +615,6 @@ Result run_sequential(const Args& args) {
     result.col_error = col_error;
     result.objective = objective;
     result.runtime_sec = now_seconds() - started;
-    result.local_rows = args.rows;
-    result.local_compute_sec = result.runtime_sec;
-    result.local_comm_sec = 0.0;
-    result.local_rows_by_rank = {args.rows};
-    result.rank_compute_sec = {result.runtime_sec};
-    result.rank_comm_sec = {0.0};
-    result.rank_total_sec = {result.runtime_sec};
     return result;
 }
 
@@ -427,76 +677,76 @@ void allreduce_columns(
     result.column_syncs += 1;
 }
 
-void gather_rank_metrics(Result& result, int local_rows, MPI_Comm comm, int rank, int size) {
-    const double local_total_sec = result.runtime_sec;
+void gather_rank_metrics(
+    Result& result,
+    const std::vector<double>& weights,
+    long long rows_field,
+    int chunks_field,
+    double local_compute_sec,
+    double local_comm_sec,
+    double local_total_sec,
+    long long processed_rows,
+    int queue_chunks,
+    double scheduler_sec,
+    MPI_Comm comm,
+    int rank,
+    int size
+) {
+    const double local_rows_per_sec =
+        local_compute_sec > 0.0 ? static_cast<double>(processed_rows) / local_compute_sec : 0.0;
+
     if (rank == 0) {
+        result.effective_rank_weights = weights;
         result.local_rows_by_rank.resize(size);
+        result.local_chunks_by_rank.resize(size);
         result.rank_compute_sec.resize(size);
         result.rank_comm_sec.resize(size);
         result.rank_total_sec.resize(size);
+        result.rank_rows_per_sec.resize(size);
+        result.queue_chunks_by_rank.resize(size);
     }
-    MPI_Gather(
-        &local_rows,
-        1,
-        MPI_INT,
-        rank == 0 ? result.local_rows_by_rank.data() : nullptr,
-        1,
-        MPI_INT,
-        0,
-        comm
-    );
-    MPI_Gather(
-        &result.local_compute_sec,
-        1,
-        MPI_DOUBLE,
-        rank == 0 ? result.rank_compute_sec.data() : nullptr,
-        1,
-        MPI_DOUBLE,
-        0,
-        comm
-    );
-    MPI_Gather(
-        &result.local_comm_sec,
-        1,
-        MPI_DOUBLE,
-        rank == 0 ? result.rank_comm_sec.data() : nullptr,
-        1,
-        MPI_DOUBLE,
-        0,
-        comm
-    );
-    MPI_Gather(
-        &local_total_sec,
-        1,
-        MPI_DOUBLE,
-        rank == 0 ? result.rank_total_sec.data() : nullptr,
-        1,
-        MPI_DOUBLE,
-        0,
-        comm
-    );
 
-    double max_runtime = 0.0;
-    MPI_Reduce(&local_total_sec, &max_runtime, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+    MPI_Gather(&rows_field, 1, MPI_LONG_LONG, result.local_rows_by_rank.data(), 1, MPI_LONG_LONG, 0, comm);
+    MPI_Gather(&chunks_field, 1, MPI_INT, result.local_chunks_by_rank.data(), 1, MPI_INT, 0, comm);
+    MPI_Gather(&local_compute_sec, 1, MPI_DOUBLE, result.rank_compute_sec.data(), 1, MPI_DOUBLE, 0, comm);
+    MPI_Gather(&local_comm_sec, 1, MPI_DOUBLE, result.rank_comm_sec.data(), 1, MPI_DOUBLE, 0, comm);
+    MPI_Gather(&local_total_sec, 1, MPI_DOUBLE, result.rank_total_sec.data(), 1, MPI_DOUBLE, 0, comm);
+    MPI_Gather(&local_rows_per_sec, 1, MPI_DOUBLE, result.rank_rows_per_sec.data(), 1, MPI_DOUBLE, 0, comm);
+    MPI_Gather(&queue_chunks, 1, MPI_INT, result.queue_chunks_by_rank.data(), 1, MPI_INT, 0, comm);
+
+    double max_scheduler_sec = 0.0;
+    double max_total_sec = 0.0;
+    MPI_Reduce(&scheduler_sec, &max_scheduler_sec, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+    MPI_Reduce(&local_total_sec, &max_total_sec, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
     if (rank == 0) {
-        result.runtime_sec = max_runtime;
+        result.queue_scheduler_sec = max_scheduler_sec;
+        result.runtime_sec = max_total_sec;
+        result.suggested_rank_weights = suggest_rank_weights(result.rank_rows_per_sec);
     }
 }
 
-Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
-    const auto [start, end] = split_range(args.rows, size, rank);
-    const int local_rows = end - start;
-    std::vector<double> local_cost = build_cost_block(start, local_rows, args.rows, args.cols, args.cost_mode, args.seed);
+Result run_mpi_static(
+    const Args& args,
+    MPI_Comm comm,
+    int rank,
+    int size,
+    const std::vector<double>& weights
+) {
+    const PartitionPlan partition = build_partition_plan(args, rank, size, weights);
+    const int local_rows = static_cast<int>(partition.rows_by_rank[rank]);
+    const int local_chunks = partition.chunks_by_rank[rank];
+    std::vector<double> local_cost =
+        build_cost_blocks(partition.local_blocks, args.rows, args.cols, args.cost_mode, args.seed);
 
     const double local_min = min_value(local_cost);
     double global_min = 0.0;
     MPI_Allreduce(&local_min, &global_min, 1, MPI_DOUBLE, MPI_MIN, comm);
 
     const double started = now_seconds();
-    Result result;
-    const double kernel_started = now_seconds();
+    double local_compute_sec = 0.0;
+    double compute_started = now_seconds();
     std::vector<double> local_kernel = build_kernel(local_cost, global_min, args.epsilon, args.kernel_cutoff);
-    result.local_compute_sec += now_seconds() - kernel_started;
+    local_compute_sec += now_seconds() - compute_started;
     std::vector<double> local_u(local_rows, 1.0);
     std::vector<double> v(args.cols, 1.0);
     std::vector<double> local_col(args.cols, 0.0);
@@ -504,10 +754,10 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
 
     const double a_value = 1.0 / static_cast<double>(args.rows);
     const double b_value = 1.0 / static_cast<double>(args.cols);
-    result.local_rows = local_rows;
+    Result result;
 
     for (int iteration = 1; iteration <= args.max_iters; ++iteration) {
-        double compute_started = now_seconds();
+        compute_started = now_seconds();
         for (int i = 0; i < local_rows; ++i) {
             const std::size_t base = static_cast<std::size_t>(i) * args.cols;
             double sum = 0.0;
@@ -531,7 +781,8 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
                 }
             }
         }
-        result.local_compute_sec += now_seconds() - compute_started;
+        local_compute_sec += now_seconds() - compute_started;
+
         const bool should_sync =
             args.comm_mode != "lazy" || iteration % args.sync_every == 0 || iteration == args.max_iters;
         if (should_sync) {
@@ -543,9 +794,9 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
 
         result.iterations = iteration;
         if (iteration % args.check_every == 0 || iteration == args.max_iters) {
+            compute_started = now_seconds();
             double local_row_error = 0.0;
             std::fill(local_col.begin(), local_col.end(), 0.0);
-            compute_started = now_seconds();
             for (int i = 0; i < local_rows; ++i) {
                 const std::size_t base = static_cast<std::size_t>(i) * args.cols;
                 const double ui = local_u[i];
@@ -560,9 +811,10 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
                 }
                 local_row_error += std::abs(row_mass - a_value);
             }
-            result.local_compute_sec += now_seconds() - compute_started;
+            local_compute_sec += now_seconds() - compute_started;
+
             double row_error = 0.0;
-            double comm_started = now_seconds();
+            const double comm_started = now_seconds();
             MPI_Allreduce(&local_row_error, &row_error, 1, MPI_DOUBLE, MPI_SUM, comm);
             MPI_Allreduce(local_col.data(), global_col.data(), args.cols, MPI_DOUBLE, MPI_SUM, comm);
             result.local_comm_sec += now_seconds() - comm_started;
@@ -581,7 +833,7 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
     double local_row_error = 0.0;
     double local_objective = 0.0;
     std::fill(local_col.begin(), local_col.end(), 0.0);
-    double compute_started = now_seconds();
+    compute_started = now_seconds();
     for (int i = 0; i < local_rows; ++i) {
         const std::size_t base = static_cast<std::size_t>(i) * args.cols;
         const double ui = local_u[i];
@@ -597,7 +849,8 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
         }
         local_row_error += std::abs(row_mass - a_value);
     }
-    result.local_compute_sec += now_seconds() - compute_started;
+    local_compute_sec += now_seconds() - compute_started;
+
     double row_error = 0.0;
     double objective = 0.0;
     double comm_started = now_seconds();
@@ -614,8 +867,398 @@ Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
     result.col_error = col_error;
     result.objective = objective;
     result.runtime_sec = now_seconds() - started;
-    gather_rank_metrics(result, local_rows, comm, rank, size);
+
+    const long long processed_rows =
+        static_cast<long long>(local_rows) * static_cast<long long>(std::max(1, result.iterations));
+    gather_rank_metrics(
+        result,
+        weights,
+        local_rows,
+        local_chunks,
+        local_compute_sec,
+        result.local_comm_sec,
+        result.runtime_sec,
+        processed_rows,
+        0,
+        0.0,
+        comm,
+        rank,
+        size
+    );
     return result;
+}
+
+double kernel_value_for_row(
+    const Args& args,
+    int row,
+    int col,
+    double global_min
+) {
+    const double cost = cost_value(row, col, args.rows, args.cols, args.cost_mode, args.seed);
+    const double value = std::exp(-(cost - global_min) / args.epsilon);
+    return (args.kernel_cutoff > 0.0 && value < args.kernel_cutoff) ? 0.0 : value;
+}
+
+void accumulate_chunk_columns(
+    const Args& args,
+    const RowBlock& chunk,
+    const std::vector<double>& v,
+    double global_min,
+    std::vector<double>& local_col,
+    std::vector<double>& row_kernel
+) {
+    const double a_value = 1.0 / static_cast<double>(args.rows);
+    for (int row = chunk.start; row < chunk.end; ++row) {
+        double sum = 0.0;
+        for (int j = 0; j < args.cols; ++j) {
+            const double kij = kernel_value_for_row(args, row, j, global_min);
+            row_kernel[j] = kij;
+            if (kij != 0.0) {
+                sum += kij * v[j];
+            }
+        }
+        const double ui = a_value / (sum + kTiny);
+        for (int j = 0; j < args.cols; ++j) {
+            const double kij = row_kernel[j];
+            if (kij != 0.0) {
+                local_col[j] += kij * ui;
+            }
+        }
+    }
+}
+
+void accumulate_chunk_final(
+    const Args& args,
+    const RowBlock& chunk,
+    const std::vector<double>& v,
+    double global_min,
+    std::vector<double>& local_col,
+    std::vector<double>& row_kernel,
+    double& local_row_error,
+    double& local_objective
+) {
+    const double a_value = 1.0 / static_cast<double>(args.rows);
+    for (int row = chunk.start; row < chunk.end; ++row) {
+        double sum = 0.0;
+        for (int j = 0; j < args.cols; ++j) {
+            const double kij = kernel_value_for_row(args, row, j, global_min);
+            row_kernel[j] = kij;
+            if (kij != 0.0) {
+                sum += kij * v[j];
+            }
+        }
+
+        const double ui = a_value / (sum + kTiny);
+        double row_mass = 0.0;
+        for (int j = 0; j < args.cols; ++j) {
+            const double kij = row_kernel[j];
+            if (kij != 0.0) {
+                const double mass = ui * kij * v[j];
+                row_mass += mass;
+                local_col[j] += mass;
+                local_objective += mass * cost_value(row, j, args.rows, args.cols, args.cost_mode, args.seed);
+            }
+        }
+        local_row_error += std::abs(row_mass - a_value);
+    }
+}
+
+QueuePhaseStats run_local_column_phase(
+    const Args& args,
+    const std::vector<RowBlock>& chunks,
+    const std::vector<double>& v,
+    double global_min,
+    std::vector<double>& local_col
+) {
+    QueuePhaseStats stats;
+    std::vector<double> row_kernel(args.cols, 0.0);
+    for (const RowBlock& chunk : chunks) {
+        const double compute_started = now_seconds();
+        accumulate_chunk_columns(args, chunk, v, global_min, local_col, row_kernel);
+        stats.compute_sec += now_seconds() - compute_started;
+        stats.rows += block_rows(chunk);
+        stats.chunks += 1;
+    }
+    return stats;
+}
+
+QueuePhaseStats run_local_final_phase(
+    const Args& args,
+    const std::vector<RowBlock>& chunks,
+    const std::vector<double>& v,
+    double global_min,
+    std::vector<double>& local_col
+) {
+    QueuePhaseStats stats;
+    std::vector<double> row_kernel(args.cols, 0.0);
+    for (const RowBlock& chunk : chunks) {
+        const double compute_started = now_seconds();
+        accumulate_chunk_final(
+            args,
+            chunk,
+            v,
+            global_min,
+            local_col,
+            row_kernel,
+            stats.row_error,
+            stats.objective
+        );
+        stats.compute_sec += now_seconds() - compute_started;
+        stats.rows += block_rows(chunk);
+        stats.chunks += 1;
+    }
+    return stats;
+}
+
+void serve_chunk_queue(const std::vector<RowBlock>& chunks, int size, MPI_Comm comm, QueuePhaseStats& stats) {
+    const double started = now_seconds();
+    int next_chunk = 0;
+    int stopped_workers = 0;
+    const int worker_count = size - 1;
+    while (stopped_workers < worker_count) {
+        int request = 0;
+        MPI_Status status;
+        MPI_Recv(&request, 1, MPI_INT, MPI_ANY_SOURCE, kQueueRequestTag, comm, &status);
+
+        const int chunk_id = next_chunk < static_cast<int>(chunks.size()) ? next_chunk++ : -1;
+        MPI_Send(&chunk_id, 1, MPI_INT, status.MPI_SOURCE, kQueueReplyTag, comm);
+        if (chunk_id < 0) {
+            stopped_workers += 1;
+        }
+    }
+    stats.scheduler_sec += now_seconds() - started;
+}
+
+int request_chunk(MPI_Comm comm, QueuePhaseStats& stats) {
+    int request = 1;
+    int chunk_id = -1;
+    const double started = now_seconds();
+    MPI_Send(&request, 1, MPI_INT, 0, kQueueRequestTag, comm);
+    MPI_Recv(&chunk_id, 1, MPI_INT, 0, kQueueReplyTag, comm, MPI_STATUS_IGNORE);
+    stats.scheduler_sec += now_seconds() - started;
+    return chunk_id;
+}
+
+QueuePhaseStats run_message_queue_column_phase(
+    const Args& args,
+    const std::vector<RowBlock>& chunks,
+    const std::vector<double>& v,
+    double global_min,
+    std::vector<double>& local_col,
+    int rank,
+    int size,
+    MPI_Comm comm
+) {
+    QueuePhaseStats stats;
+    if (rank == 0) {
+        serve_chunk_queue(chunks, size, comm, stats);
+        return stats;
+    }
+
+    std::vector<double> row_kernel(args.cols, 0.0);
+    while (true) {
+        const int chunk_id = request_chunk(comm, stats);
+        if (chunk_id < 0) {
+            break;
+        }
+        const RowBlock& chunk = chunks[chunk_id];
+        const double compute_started = now_seconds();
+        accumulate_chunk_columns(args, chunk, v, global_min, local_col, row_kernel);
+        stats.compute_sec += now_seconds() - compute_started;
+        stats.rows += block_rows(chunk);
+        stats.chunks += 1;
+    }
+    return stats;
+}
+
+QueuePhaseStats run_message_queue_final_phase(
+    const Args& args,
+    const std::vector<RowBlock>& chunks,
+    const std::vector<double>& v,
+    double global_min,
+    std::vector<double>& local_col,
+    int rank,
+    int size,
+    MPI_Comm comm
+) {
+    QueuePhaseStats stats;
+    if (rank == 0) {
+        serve_chunk_queue(chunks, size, comm, stats);
+        return stats;
+    }
+
+    std::vector<double> row_kernel(args.cols, 0.0);
+    while (true) {
+        const int chunk_id = request_chunk(comm, stats);
+        if (chunk_id < 0) {
+            break;
+        }
+        const RowBlock& chunk = chunks[chunk_id];
+        const double compute_started = now_seconds();
+        accumulate_chunk_final(
+            args,
+            chunk,
+            v,
+            global_min,
+            local_col,
+            row_kernel,
+            stats.row_error,
+            stats.objective
+        );
+        stats.compute_sec += now_seconds() - compute_started;
+        stats.rows += block_rows(chunk);
+        stats.chunks += 1;
+    }
+    return stats;
+}
+
+Result run_mpi_runtime_queue(
+    const Args& args,
+    MPI_Comm comm,
+    int rank,
+    int size,
+    const std::vector<double>& weights
+) {
+    const std::vector<RowBlock> chunks = build_row_chunks(args.rows, args.chunk_rows);
+    const auto [min_start, min_end] = split_range(args.rows, size, rank);
+    const double local_min = min_cost_range(min_start, min_end, args.rows, args.cols, args.cost_mode, args.seed);
+    double global_min = 0.0;
+    MPI_Allreduce(&local_min, &global_min, 1, MPI_DOUBLE, MPI_MIN, comm);
+
+    const bool use_message_queue = size > 1;
+
+    const double started = now_seconds();
+    std::vector<double> v(args.cols, 1.0);
+    std::vector<double> local_col(args.cols, 0.0);
+    std::vector<double> global_col(args.cols, 0.0);
+
+    const double b_value = 1.0 / static_cast<double>(args.cols);
+    Result result;
+    double local_compute_sec = 0.0;
+    double local_scheduler_sec = 0.0;
+    long long processed_rows = 0;
+    int processed_chunks = 0;
+
+    for (int iteration = 1; iteration <= args.max_iters; ++iteration) {
+        std::fill(local_col.begin(), local_col.end(), 0.0);
+        QueuePhaseStats phase = use_message_queue
+            ? run_message_queue_column_phase(
+                args,
+                chunks,
+                v,
+                global_min,
+                local_col,
+                rank,
+                size,
+                comm
+            )
+            : run_local_column_phase(args, chunks, v, global_min, local_col);
+        local_compute_sec += phase.compute_sec;
+        local_scheduler_sec += phase.scheduler_sec;
+        processed_rows += phase.rows;
+        processed_chunks += phase.chunks;
+
+        const bool should_sync =
+            args.comm_mode != "lazy" || iteration % args.sync_every == 0 || iteration == args.max_iters;
+        if (should_sync) {
+            allreduce_columns(args, local_col, global_col, comm, result);
+            for (int j = 0; j < args.cols; ++j) {
+                v[j] = b_value / (global_col[j] + kTiny);
+            }
+        }
+
+        result.iterations = iteration;
+        if (iteration % args.check_every == 0 || iteration == args.max_iters) {
+            std::fill(local_col.begin(), local_col.end(), 0.0);
+            QueuePhaseStats check = use_message_queue
+                ? run_message_queue_final_phase(
+                    args,
+                    chunks,
+                    v,
+                    global_min,
+                    local_col,
+                    rank,
+                    size,
+                    comm
+                )
+                : run_local_final_phase(args, chunks, v, global_min, local_col);
+            local_compute_sec += check.compute_sec;
+            local_scheduler_sec += check.scheduler_sec;
+
+            double row_error = 0.0;
+            const double comm_started = now_seconds();
+            MPI_Allreduce(&check.row_error, &row_error, 1, MPI_DOUBLE, MPI_SUM, comm);
+            MPI_Allreduce(local_col.data(), global_col.data(), args.cols, MPI_DOUBLE, MPI_SUM, comm);
+            result.local_comm_sec += now_seconds() - comm_started;
+            double col_error = 0.0;
+            for (int j = 0; j < args.cols; ++j) {
+                col_error += std::abs(global_col[j] - b_value);
+            }
+            result.row_error = row_error;
+            result.col_error = col_error;
+            if (row_error < args.tol && col_error < args.tol) {
+                break;
+            }
+        }
+    }
+
+    std::fill(local_col.begin(), local_col.end(), 0.0);
+    QueuePhaseStats final = use_message_queue
+        ? run_message_queue_final_phase(
+            args,
+            chunks,
+            v,
+            global_min,
+            local_col,
+            rank,
+            size,
+            comm
+        )
+        : run_local_final_phase(args, chunks, v, global_min, local_col);
+    local_compute_sec += final.compute_sec;
+    local_scheduler_sec += final.scheduler_sec;
+
+    double row_error = 0.0;
+    double objective = 0.0;
+    double comm_started = now_seconds();
+    MPI_Allreduce(&final.row_error, &row_error, 1, MPI_DOUBLE, MPI_SUM, comm);
+    MPI_Allreduce(&final.objective, &objective, 1, MPI_DOUBLE, MPI_SUM, comm);
+    MPI_Allreduce(local_col.data(), global_col.data(), args.cols, MPI_DOUBLE, MPI_SUM, comm);
+    result.local_comm_sec += now_seconds() - comm_started;
+
+    double col_error = 0.0;
+    for (int j = 0; j < args.cols; ++j) {
+        col_error += std::abs(global_col[j] - b_value);
+    }
+    result.row_error = row_error;
+    result.col_error = col_error;
+    result.objective = objective;
+    result.runtime_sec = now_seconds() - started;
+
+    gather_rank_metrics(
+        result,
+        weights,
+        processed_rows,
+        processed_chunks,
+        local_compute_sec,
+        result.local_comm_sec,
+        result.runtime_sec,
+        processed_rows,
+        processed_chunks,
+        local_scheduler_sec,
+        comm,
+        rank,
+        size
+    );
+    return result;
+}
+
+Result run_mpi(const Args& args, MPI_Comm comm, int rank, int size) {
+    const std::vector<double> weights = resolve_rank_weights(args, size);
+    if (args.partition_mode == "runtime-queue") {
+        return run_mpi_runtime_queue(args, comm, rank, size, weights);
+    }
+    return run_mpi_static(args, comm, rank, size, weights);
 }
 
 void usage(const char* program) {
@@ -624,7 +1267,9 @@ void usage(const char* program) {
         << "Options: --cost-mode random|squared_distance_1d|block --seed N --epsilon X\n"
         << "         --max-iters N --tol X --check-every N\n"
         << "         --comm-mode double|float32|quantized|lazy --sync-every N\n"
-        << "         --kernel-cutoff X --quantization-scale X\n";
+        << "         --kernel-cutoff X --quantization-scale X\n"
+        << "         --partition-mode contiguous|weighted-chunk|runtime-queue\n"
+        << "         --chunk-rows N --rank-weights CSV\n";
 }
 
 Args parse_args(int argc, char** argv) {
@@ -663,6 +1308,12 @@ Args parse_args(int argc, char** argv) {
             args.kernel_cutoff = std::stod(need_value(key));
         } else if (key == "--quantization-scale") {
             args.quantization_scale = std::stod(need_value(key));
+        } else if (key == "--partition-mode") {
+            args.partition_mode = need_value(key);
+        } else if (key == "--chunk-rows") {
+            args.chunk_rows = std::stoi(need_value(key));
+        } else if (key == "--rank-weights") {
+            args.rank_weights = parse_double_csv(need_value(key));
         } else if (key == "--output") {
             args.output = need_value(key);
         } else if (key == "--help" || key == "-h") {
@@ -675,6 +1326,13 @@ Args parse_args(int argc, char** argv) {
 
     if (args.mode != "sequential" && args.mode != "mpi") {
         throw std::runtime_error("--mode must be sequential or mpi");
+    }
+    if (
+        args.partition_mode != "contiguous" &&
+        args.partition_mode != "weighted-chunk" &&
+        args.partition_mode != "runtime-queue"
+    ) {
+        throw std::runtime_error("--partition-mode must be contiguous, weighted-chunk, or runtime-queue");
     }
     if (
         args.comm_mode != "double" &&
@@ -692,6 +1350,9 @@ Args parse_args(int argc, char** argv) {
     }
     if (args.max_iters <= 0 || args.check_every <= 0) {
         throw std::runtime_error("--max-iters and --check-every must be positive");
+    }
+    if (args.chunk_rows <= 0) {
+        throw std::runtime_error("--chunk-rows must be positive");
     }
     if (args.sync_every <= 0) {
         throw std::runtime_error("--sync-every must be positive");
@@ -717,6 +1378,12 @@ int main(int argc, char** argv) {
     try {
         Args args = parse_args(argc, argv);
         const std::string sparse_suffix = args.kernel_cutoff > 0.0 ? "_sparse_cutoff" : "";
+        std::string partition_suffix;
+        if (args.partition_mode == "weighted-chunk") {
+            partition_suffix = "_weighted_chunk";
+        } else if (args.partition_mode == "runtime-queue") {
+            partition_suffix = "_runtime_queue";
+        }
 
         if (args.mode == "sequential") {
             Result result = run_sequential(args);
@@ -740,7 +1407,13 @@ int main(int argc, char** argv) {
         Result result = run_mpi(args, MPI_COMM_WORLD, rank, size);
         std::vector<std::string> hostnames = gather_hostnames(MPI_COMM_WORLD, rank, size);
         if (rank == 0) {
-            write_json(args, result, size, hostnames, "sinkhorn_cpp_mpi_" + args.comm_mode + sparse_suffix);
+            write_json(
+                args,
+                result,
+                size,
+                hostnames,
+                "sinkhorn_cpp_mpi_" + args.comm_mode + partition_suffix + sparse_suffix
+            );
             std::cout << "C++ MPI Sinkhorn complete: runtime=" << std::fixed << std::setprecision(6)
                       << result.runtime_sec << "s, iterations=" << result.iterations
                       << ", row_error=" << std::scientific << result.row_error
@@ -748,9 +1421,11 @@ int main(int argc, char** argv) {
                       << ", objective=" << std::fixed << std::setprecision(12) << result.objective
                       << ", processes=" << size
                       << ", comm_mode=" << args.comm_mode
+                      << ", partition_mode=" << args.partition_mode
                       << ", column_syncs=" << result.column_syncs
                       << ", column_payload_bytes=" << result.column_payload_bytes
                       << ", kernel_cutoff=" << args.kernel_cutoff
+                      << ", suggested_rank_weights=" << double_csv(result.suggested_rank_weights)
                       << std::endl;
         }
         MPI_Finalize();
