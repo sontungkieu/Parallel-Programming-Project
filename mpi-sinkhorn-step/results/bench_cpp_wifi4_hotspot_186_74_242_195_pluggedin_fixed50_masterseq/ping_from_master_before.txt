@@ -1,0 +1,29 @@
+timestamp=2026-07-03T07:52:10+00:00
+master=vmubuntu 10.110.77.186 2401:d800:2cd:acef:a00:27ff:fe2b:61ff 
+--- ping 10.110.77.74 ---
+PING 10.110.77.74 (10.110.77.74) 56(84) bytes of data.
+64 bytes from 10.110.77.74: icmp_seq=1 ttl=64 time=14.5 ms
+64 bytes from 10.110.77.74: icmp_seq=2 ttl=64 time=9.78 ms
+64 bytes from 10.110.77.74: icmp_seq=3 ttl=64 time=11.6 ms
+
+--- 10.110.77.74 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2672ms
+rtt min/avg/max/mdev = 9.784/11.938/14.472/1.932 ms
+--- ping 10.110.77.242 ---
+PING 10.110.77.242 (10.110.77.242) 56(84) bytes of data.
+64 bytes from 10.110.77.242: icmp_seq=1 ttl=64 time=17.6 ms
+64 bytes from 10.110.77.242: icmp_seq=2 ttl=64 time=20.7 ms
+64 bytes from 10.110.77.242: icmp_seq=3 ttl=64 time=17.7 ms
+
+--- 10.110.77.242 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 5048ms
+rtt min/avg/max/mdev = 17.646/18.688/20.711/1.430 ms
+--- ping 10.110.77.195 ---
+PING 10.110.77.195 (10.110.77.195) 56(84) bytes of data.
+64 bytes from 10.110.77.195: icmp_seq=1 ttl=64 time=11.3 ms
+64 bytes from 10.110.77.195: icmp_seq=2 ttl=64 time=13.9 ms
+64 bytes from 10.110.77.195: icmp_seq=3 ttl=64 time=17.6 ms
+
+--- 10.110.77.195 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2013ms
+rtt min/avg/max/mdev = 11.269/14.259/17.640/2.615 ms
