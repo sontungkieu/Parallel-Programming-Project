@@ -78,6 +78,10 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Archives and editor state
+*.zip*
+.vscode/
+
 # IPython
 profile_default/
 ipython_config.py
